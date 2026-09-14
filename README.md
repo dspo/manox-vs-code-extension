@@ -66,7 +66,8 @@ The `.node` addon is **not bundled**. Build it from the manox repository:
 ```sh
 git clone https://github.com/dspo/manox   # or your local checkout
 cd manox
-script/build-napi            # stages target/napi/manox_napi.node (release)
+script/build-napi            # lean addon (no MCP/LSP/terminal/WS-gateway), release
+# script/build-napi --full  for the complete runtime
 # script/build-napi --debug for a debug build
 ```
 
@@ -136,10 +137,15 @@ lock-step with the Rust `manox-protocol` crate (protocol epoch 6):
 - **Non-viewed sessions auto-deny adjudications** (fail-closed §D.4): an
   approval for a session the sidebar is not currently following is denied on
   arrival. Follow the session to answer interactively.
-- Not wired yet (protocol supports; UI does not): terminal streams
-  (`followTerminal` / `TerminalAttach`), `ForkSession`, background tasks,
-  sub-agent panels, backwards history paging (`PageHistory`), plan-mode
-  composer affordances, `GetConversationInfo` usage card.
+- The staged addon is the **lean** napi build (manox PR #790): no MCP client,
+  no LSP integration, no terminal stack, no WS gateway — terminal call arms
+  answer the `feature/unavailable` stable code, and the agent falls back to
+  its documented no-MCP/no-LSP paths. Build with `script/build-napi --full`
+  and restage to get those back; any napi consumer can also mix per
+  subsystem (`--features mcp,lsp,…`).
+- Not wired yet (protocol supports; UI does not): `ForkSession`, background
+  tasks, sub-agent panels, backwards history paging (`PageHistory`),
+  plan-mode composer affordances, `GetConversationInfo` usage card.
 - The old extension's `languageModelChatProviders` integration (exposing
   manox providers as VS Code language models via `modelChat`) was cut with
   the revival — it depended on proposed chat-provider APIs; revisit once
