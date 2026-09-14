@@ -1,0 +1,118 @@
+{
+  "name": "manox-vscode",
+  "displayName": "manox",
+  "description": "manox agent workbench inside VS Code — the headless manox runtime embedded in-process through the manox-napi binding, speaking protocol v2 (journal streams + projections + host events).",
+  "version": "0.5.0",
+  "publisher": "dspo",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.104.0"
+  },
+  "keywords": [
+    "language-models"
+  ],
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:manox.chatView",
+    "onChatParticipant:manox"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "manox",
+        "fullName": "manox",
+        "name": "manox",
+        "description": "manox agent — ask anything, it runs on the native manox runtime",
+        "isSticky": true
+      }
+    ],
+    "configuration": {
+      "title": "manox",
+      "properties": {
+        "manox.sdkRoot": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Directory containing the staged `manox_napi.node` native binding (built by `script/build-napi` in the dspo/manox repository). Resolution order: this setting, then the `VSCODE_AGENT_HOST_MANOX_SDK_ROOT` environment variable, then `<extension>/native/`."
+        },
+        "manox.stateRoot": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Value for `MANOX_HOME` — the manox persistent-state root (threads database, session journals, provider config snapshot) used by the embedded runtime. Must not be the desktop app's `~/.manox` (the runtime lock is exclusive; contention terminates the extension host). Empty uses `~/.manox-vscode`."
+        },
+        "manox.approvalMode": {
+          "type": "string",
+          "enum": [
+            "read-only",
+            "workspace-write",
+            "danger-full-access"
+          ],
+          "enumDescriptions": [
+            "Tools may read but not modify files",
+            "Writes confined to the workspace and the manox state root",
+            "No confinement; every tool call runs unrestricted"
+          ],
+          "default": "workspace-write",
+          "markdownDescription": "Tool-authorization policy seeded into new manox sessions, mirroring the native `PermissionMode`."
+        }
+      }
+    },
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "manox",
+          "title": "manox",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "manox": [
+        {
+          "type": "webview",
+          "id": "manox.chatView",
+          "name": "manox",
+          "contextualTitle": "manox"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "manox.focus",
+        "title": "manox: Focus Chat"
+      },
+      {
+        "command": "manox.newSession",
+        "title": "manox: New Session",
+        "icon": "$(add)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "manox.newSession",
+          "when": "view == manox.chatView",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "npm run typecheck && node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "watch": "node esbuild.config.mjs --watch",
+    "test": "vitest run",
+    "package": "npm run compile && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.98.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.10"
+  }
+}
