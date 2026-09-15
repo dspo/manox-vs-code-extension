@@ -147,8 +147,14 @@ export class TranscriptFold {
 	/** Canonical `{provider}/{modelId}` in force; stamps new assistant items
 	 * (display only). */
 	modelRef: string | null = null;
-	private lastAssistantSeq = -1;
-	private lastThinkingSeq = -1;
+	/** Open streaming draft runs: a delta merges into the trailing item of
+	 * its run. Runs survive transcript-invisible rows (sub-agent chatter,
+	 * metrics, state edges — these consume journal seqs but fold nothing)
+	 * and close at any rendered row or durable `message` boundary. The old
+	 * seq-adjacency test split runs wherever a subagent_child row landed
+	 * between deltas (manox main journals them inline). */
+	private thinkingRunAt: number | null = null;
+	private assistantRunAt: number | null = null;
 	/** The `subagentProgress` rows folded so far (agents list source). */
 	readonly subagents = new Map<
 		string,
@@ -200,12 +206,33 @@ export class TranscriptFold {
 		this.subagents.clear();
 		this.subagentChildren.clear();
 		this.backgroundTasks.clear();
-		this.lastAssistantSeq = -1;
-		this.lastThinkingSeq = -1;
+		this.thinkingRunAt = null;
+		this.assistantRunAt = null;
 		this.side = emptySide();
 	}
 
+	/** Rows that fold nothing into `items`; they must not break an open
+	 * streaming run (they still consume journal seqs). */
+	private static readonly RUN_PRESERVING_TAGS: ReadonlySet<string> = new Set([
+		'subagentChild', 'subagentProgress', 'approval', 'metrics',
+		'modelChange', 'cwdChange', 'projectChange', 'permissionModeChange',
+		'reasoningEffortChange', 'planModeChange', 'planUpdate', 'goal',
+		'title', 'browserSuites', 'pinnedArchived', 'activeToolsChange',
+		'branchSummary', 'label', 'sessionInfo', 'leaf', 'backgroundTask',
+	]);
+
 	private applyRecord(r: WireRecord): void {
+		// Any row outside the preserving set and the delta/message arms is a
+		// rendered segment boundary: close the draft runs first.
+		if (
+			!TranscriptFold.RUN_PRESERVING_TAGS.has(r.type) &&
+			r.type !== 'agentThinkingDelta' &&
+			r.type !== 'agentTextDelta' &&
+			r.type !== 'message'
+		) {
+			this.thinkingRunAt = null;
+			this.assistantRunAt = null;
+		}
 		switch (r.type) {
 			case 'message':
 				this.onMessage(r);
@@ -247,9 +274,10 @@ export class TranscriptFold {
 			case 'agentTextDelta': {
 				const s = asString(r.s);
 				if (s === null) return;
-				const last = this.items[this.items.length - 1];
-				if (last && last.kind === 'assistant' && this.lastAssistantSeq === r.seq - 1) {
-					this.items[this.items.length - 1] = { ...last, text: last.text + s };
+				const at = this.assistantRunAt;
+				const last = at !== null ? this.items[at] : undefined;
+				if (at !== null && last && last.kind === 'assistant') {
+					this.items[at] = { ...last, text: last.text + s };
 				} else {
 					this.items.push({
 						kind: 'assistant',
@@ -257,20 +285,21 @@ export class TranscriptFold {
 						text: s,
 						modelId: this.modelRef,
 					});
+					this.assistantRunAt = this.items.length - 1;
 				}
-				this.lastAssistantSeq = r.seq;
 				return;
 			}
 			case 'agentThinkingDelta': {
 				const s = asString(r.s);
 				if (s === null) return;
-				const last = this.items[this.items.length - 1];
-				if (last && last.kind === 'thinking' && this.lastThinkingSeq === r.seq - 1) {
-					this.items[this.items.length - 1] = { ...last, text: last.text + s };
+				const at = this.thinkingRunAt;
+				const last = at !== null ? this.items[at] : undefined;
+				if (at !== null && last && last.kind === 'thinking') {
+					this.items[at] = { ...last, text: last.text + s };
 				} else {
 					this.items.push({ kind: 'thinking', id: nextFoldId('thinking'), text: s });
+					this.thinkingRunAt = this.items.length - 1;
 				}
-				this.lastThinkingSeq = r.seq;
 				return;
 			}
 			case 'toolCall': {
@@ -405,6 +434,8 @@ export class TranscriptFold {
 				}
 			}
 			if (!text && images.length === 0) return;
+			this.thinkingRunAt = null;
+			this.assistantRunAt = null;
 			this.items.push({
 				kind: 'user',
 				id: r.id || nextFoldId('user'),
@@ -426,25 +457,24 @@ export class TranscriptFold {
 	private onAssistantMessage(blocks: ReturnType<typeof parseBlock>[], r: WireRecord): void {
 		// Durable assistant row: finalize the streamed draft(s) and stamp the
 		// model in force. Thinking-first, then text — mirror the block order.
-		let sawText = false;
-		let sawThinking = false;
 		for (const b of blocks) {
 			if (!b) continue;
 			if (b.type === 'thinking' && b.text.trim() && !b.redacted) {
-				const last = this.items[this.items.length - 1];
-				if (last && last.kind === 'thinking' && this.lastThinkingSeq !== -1) {
-					this.items[this.items.length - 1] = { ...last, text: b.text };
+				const at = this.thinkingRunAt;
+				const last = at !== null ? this.items[at] : undefined;
+				if (at !== null && last && last.kind === 'thinking') {
+					// Replace the streamed draft with the authoritative text.
+					this.items[at] = { ...last, text: b.text };
 				} else {
 					this.items.push({ kind: 'thinking', id: nextFoldId('thinking'), text: b.text });
 				}
-				this.lastThinkingSeq = r.seq;
-				sawThinking = true;
 			}
 			if (b.type === 'text' && b.text.trim()) {
-				const last = this.items[this.items.length - 1];
-				if (last && last.kind === 'assistant' && this.lastAssistantSeq !== -1) {
+				const at = this.assistantRunAt;
+				const last = at !== null ? this.items[at] : undefined;
+				if (at !== null && last && last.kind === 'assistant') {
 					// Replace the streamed draft with the authoritative text.
-					this.items[this.items.length - 1] = { ...last, text: b.text };
+					this.items[at] = { ...last, text: b.text };
 				} else {
 					this.items.push({
 						kind: 'assistant',
@@ -453,8 +483,6 @@ export class TranscriptFold {
 						modelId: this.modelRef,
 					});
 				}
-				this.lastAssistantSeq = r.seq;
-				sawText = true;
 			}
 			if (b.type === 'toolCall' && b.id) {
 				this.upsertTool(b.id, (prev) => ({
@@ -468,12 +496,10 @@ export class TranscriptFold {
 				}));
 			}
 		}
-		// A streaming turn always ends with an authoritative row; reset the
-		// draft continuations so a later delta opens a new bubble.
-		if (sawText || sawThinking) {
-			this.lastAssistantSeq = sawText ? r.seq : -1;
-			this.lastThinkingSeq = sawThinking ? r.seq : -1;
-		}
+		// A durable assistant row ends the streamed drafts: a later delta
+		// opens a fresh bubble.
+		this.thinkingRunAt = null;
+		this.assistantRunAt = null;
 	}
 
 	private onToolMessage(r: WireRecord): void {
