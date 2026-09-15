@@ -220,6 +220,10 @@ export const Composer = ({
   const [recallIndex, setRecallIndex] = useState(-1);
   const fallbackRef = useRef<HTMLTextAreaElement>(null);
   const textareaRef = composerInputRef ?? fallbackRef;
+  // Mirror of the (changing) session id for the long-lived compose
+  // subscription to read without re-subscribing.
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
   // IME composition state: while composing, and for the trailing Enter some
   // engines fire right after `compositionend`, the key is deferred to the
   // IME. The timestamp window keeps the deferral tight so a later genuine
@@ -230,15 +234,25 @@ export const Composer = ({
 
   // A host `compose` note (panel Regenerate / "从该节点重新生成", §10):
   // backfill the question verbatim and refocus so the user edits/sends it
-  // as their own turn. Not auto-submitted — the prefill is a proposal.
+  // as their own turn. Two guards (review #16):
+  //   * SESSION OWNERSHIP — the note names the session it was generated
+  //     for; if the composer now shows a different thread, drop it rather
+  //     than leaking a `/codechain …` into the wrong conversation. The
+  //     `sessionIdRef` mirror keeps the long-lived subscription reading the
+  //     current value (the effect runs once).
+  //   * DRAFT SAFETY — a non-empty unsent draft is never silently
+  //     overwritten; we focus and let the user decide (no auto-submit).
+  const textRef = useRef(text);
+  textRef.current = text;
   useEffect(
     () =>
-      onComposePrefill((text) => {
-        setText(text);
+      onComposePrefill((prefill, ownerSessionId) => {
+        if (ownerSessionId && sessionIdRef.current && ownerSessionId !== sessionIdRef.current) return;
+        if (textRef.current.trim() === '') setText(prefill);
         requestAnimationFrame(() => textareaRef.current?.focus());
       }),
-    // textareaRef is a stable ref object; the subscription lives for the
-    // composer's lifetime.
+    // refs + setText are stable; the subscription lives for the composer's
+    // lifetime.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
