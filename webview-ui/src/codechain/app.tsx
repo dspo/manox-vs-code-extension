@@ -10,13 +10,17 @@
 // movement and navigation are intents posted back — the panel never
 // interprets LSP or store semantics itself.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import type { ChainKind, CodeChain, ResolvedNode } from '../../../src/codechain/types';
 import { cn } from '../sidebar/webview/lib/utils';
 import { t } from '../shared/i18n';
 import type { PanelBridge } from './bridge';
 import { allNodeIds, flattenVisible, locationLabel } from './tree';
+
+// Node-presence set for a chain (used to keep selection/collapse across a
+// same-chain re-push, review #6).
+const collectIds = (root: ResolvedNode): Set<string> => new Set(allNodeIds(root));
 
 const KIND_DOT: Record<ChainKind, string> = {
   entry: 'bg-success',
@@ -192,6 +196,11 @@ const DetailPane = ({
             {t('cc_edge')} · {node.edgeNote}
           </div>
         )}
+        {/* Summary renders as plain text (whitespace preserved), NOT markdown:
+         * it is LLM-authored prose the model writes about the user's code, so
+         * the safer literal rendering is a deliberate downgrade from §6.2's
+         * markdown note (review #14) — no need to pull the ReactMarkdown/
+         * sanitize graph into the panel bundle for a single field. */}
         <p className="text-sm leading-relaxed whitespace-pre-wrap">{node.summary}</p>
         {node.location.resolveStatus === 'ambiguous' && (node.location.candidates?.length ?? 0) > 0 && (
           <div className="mt-3">
@@ -226,22 +235,50 @@ export const CodeChainApp = ({ bridge }: { bridge: PanelBridge }) => {
   const [chain, setChain] = useState<CodeChain | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  // Last-applied chainId: distinguishes a fresh generation (reset view
+  // state) from a same-chain re-push (preserve it) — review #6.
+  const chainIdRef = useRef<string | null>(null);
   const [synced, setSynced] = useState<string | null>(null);
   const [tour, setTour] = useState({ index: -1, total: 0 });
   const [toast, setToast] = useState<string | null>(null);
+
+  // Mount handshake (review #1): `retainContextWhenHidden:false` lets VS
+  // Code discard and reload this document when the tab hides. Announce
+  // readiness once so the host re-sends the current chain snapshot —
+  // otherwise a re-shown tab sits in the empty state forever.
+  useEffect(() => {
+    bridge.post({ t: 'ready' });
+  }, [bridge]);
 
   useEffect(
     () =>
       bridge.onMessage((message) => {
         switch (message.t) {
           case 'chain': {
-            setChain(message.chain);
-            // Selection follows the fresh chain's root; collapse is reset —
-            // a re-render after refresh/expand must not fight the user's
-            // tree state of an older revision.
-            setSelected(message.chain.root.id);
-            setCollapsed(new Set());
+            const next = message.chain;
+            // Same-chain re-pushes (candidate-pick, Expand, Annotate, and
+            // the post-`ready` resnapshot) must NOT kick the user back to
+            // the root or blow away their collapse state — the host sends
+            // the whole tree every time (§6.4 patch channel was cut), so
+            // state preservation lives here (review #6). Only a genuinely
+            // new chainId resets view state.
+            const isNewGeneration = next.chainId !== chainIdRef.current;
+            chainIdRef.current = next.chainId;
+            setChain(next);
             setToast(null);
+            if (isNewGeneration) {
+              setSelected(next.root.id);
+              setCollapsed(new Set());
+            } else {
+              // Keep the current selection only while the node still
+              // exists; prune collapse entries for removed nodes.
+              const present = collectIds(next.root);
+              setSelected((prev) => (prev && present.has(prev) ? prev : next.root.id));
+              setCollapsed((prev) => {
+                const kept = new Set([...prev].filter((id) => present.has(id)));
+                return kept.size === prev.size ? prev : kept;
+              });
+            }
             return;
           }
           case 'sync':

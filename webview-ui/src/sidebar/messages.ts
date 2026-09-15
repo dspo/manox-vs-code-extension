@@ -18,12 +18,14 @@ export type ToHost = FromClient | { t: 'openCodeChain'; chainId: string };
  * `open_turn_navigator` is the macOS cmd+m path (the OS minimize
  * accelerator swallows the key before the DOM); `new_session` is the host
  * command / title-bar button; `code_chain` announces a freshly generated
- * chain for its journal card; `compose` prefills the composer (regen). */
+ * chain for its journal card; `compose` prefills the composer (regen),
+ * naming the owning session so the composer can drop it when the visible
+ * thread differs (review #16). */
 export type HostNote =
 	| { kind: 'open_turn_navigator' }
 	| { kind: 'new_session' }
 	| { kind: 'code_chain'; sessionId: string; chainId: string; title: string; nodeCount: number }
-	| { kind: 'compose'; text: string };
+	| { kind: 'compose'; text: string; sessionId: string };
 
 /** Inbound host → webview: a typed `FromServer`, or a host UI note. */
 export type ToWebview = FromServer | HostNote;

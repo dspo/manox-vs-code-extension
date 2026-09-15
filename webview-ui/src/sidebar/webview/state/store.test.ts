@@ -524,6 +524,35 @@ describe('ServerCall cards', () => {
 	});
 });
 
+// The GenCodeChain journal card (§7): pushed out-of-band (no wire frame
+// carries it), read back through the `useCodeChainCards` selector for the
+// header chip, and stable across a rebuilt journal window.
+describe('code_chain transient card (review #19)', () => {
+	it('addCodeChain parks a card; the selector surface sees it', () => {
+		const { store } = openStore();
+		store.addCodeChain(SESSION, { chainId: 'cc-1', title: '订单流程', nodeCount: 7 });
+		const cards = items(store).filter((i) => i.kind === 'code_chain');
+		expect(cards).toHaveLength(1);
+		expect(cards[0]).toMatchObject({ kind: 'code_chain', chainId: 'cc-1', nodeCount: 7 });
+	});
+
+	it('re-parking the same chainId replaces (no duplicate card)', () => {
+		const { store } = openStore();
+		store.addCodeChain(SESSION, { chainId: 'cc-1', title: 'a', nodeCount: 1 });
+		store.addCodeChain(SESSION, { chainId: 'cc-1', title: 'b', nodeCount: 9 });
+		const cards = items(store).filter((i) => i.kind === 'code_chain');
+		expect(cards).toHaveLength(1);
+		expect(cards[0]).toMatchObject({ title: 'b', nodeCount: 9 });
+	});
+
+	it('a rebuilt window keeps the card (chain is host state, not journal)', () => {
+		const { store, item } = openStore();
+		store.addCodeChain(SESSION, { chainId: 'cc-1', title: 'a', nodeCount: 1 });
+		store.dispatch(item(snapshot([userMsg(0, 'x')])));
+		expect(items(store).some((i) => i.kind === 'code_chain' && i.chainId === 'cc-1')).toBe(true);
+	});
+});
+
 // ── v1 control/registry notes (still emitted at wave/2) ───────────────────
 
 describe('v1 control/registry notes and host mirrors', () => {

@@ -170,4 +170,48 @@ describe('code-chain panel', () => {
 		expect(synced!.className).toContain('outline');
 		expect(synced!.className).not.toMatch(/(^|\s)bg-muted(\s|$)/);
 	});
+
+	it('posts `ready` on mount so a hidden-then-revealed panel resnapshots (review #1)', () => {
+		// renderPanel() mounts the app; the first outbound message is the
+		// handshake, ahead of any user interaction.
+		const { bridge } = renderPanel();
+		expect(bridge.sent[0]).toEqual({ t: 'ready' });
+	});
+
+	it('a same-chain re-push preserves selection + collapse (review #6)', () => {
+		const { bridge } = renderPanel();
+		// Collapse service.create and select validateStock.
+		const collapse = Array.from(document.querySelectorAll('[role="button"]')).find((el) =>
+			(el.textContent ?? '').includes('校验库存与风控'),
+		)!.querySelector('button');
+		act(() => collapse!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+		const row = Array.from(document.querySelectorAll('[role="button"]')).find((el) =>
+			(el.textContent ?? '').includes('createOrder'),
+		);
+		act(() => row!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+		const sentBefore = bridge.sent.length;
+		// Host re-sends the WHOLE tree (Expand/Annotate/candidate-pick).
+		act(() => {
+			bridge.feed({ t: 'chain', chain });
+		});
+		// Selection (createOrder) must survive — no silent jump back to root,
+		// and the collapsed subtree stays collapsed.
+		expect(document.body.textContent ?? '').not.toContain('validateStock');
+		// No spurious nodeClick from re-applying the chain.
+		expect(bridge.sent.length).toBe(sentBefore);
+	});
+
+	it('a NEW chainId resets view state (selection to root, no collapse)', () => {
+		const { bridge } = renderPanel();
+		const collapse = Array.from(document.querySelectorAll('[role="button"]')).find((el) =>
+			(el.textContent ?? '').includes('校验库存与风控'),
+		)!.querySelector('button');
+		act(() => collapse!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+		const fresh = { ...chain, chainId: 'cc-other' };
+		act(() => {
+			bridge.feed({ t: 'chain', chain: fresh });
+		});
+		// New generation → collapsed subtree re-appears.
+		expect(document.body.textContent ?? '').toContain('validateStock');
+	});
 });

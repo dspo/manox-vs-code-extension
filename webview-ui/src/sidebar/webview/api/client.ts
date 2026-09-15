@@ -48,7 +48,7 @@ import type { JournalPageData, StoreEffects } from '../state/store';
 const bridge: Bridge = isVscodeHost() ? createVscodeBridge() : createWebBridge();
 
 const navigatorListeners = new Set<() => void>();
-const composeListeners = new Set<(text: string) => void>();
+const composeListeners = new Set<(text: string, sessionId: string) => void>();
 
 /** The store surface the api layer drives (structurally typed so tests can
  * inject fakes). `reseat` restarts every engine + re-follows streams;
@@ -118,9 +118,11 @@ bridge.onMessage((message: ToWebview) => {
 	}
 	if ('kind' in message && (message as { kind: string }).kind === 'compose') {
 		// Panel "Regenerate" (§10): the host focuses the sidebar and posts
-		// the prefill; the live composer consumes it.
+		// the prefill; the live composer consumes it. The note carries its
+		// owning session and the consumer checks it against the active
+		// thread, so a regen never lands in the wrong composer (review #16).
 		const note = message as Extract<HostNote, { kind: 'compose' }>;
-		for (const listener of composeListeners) listener(note.text);
+		for (const listener of composeListeners) listener(note.text, note.sessionId);
 		return;
 	}
 	const frame = message as FromServer;
@@ -157,7 +159,7 @@ export function onOpenTurnNavigator(listener: () => void): () => void {
 
 /** Subscribe to host-requested composer prefills (the panel's Regenerate /
  * "从该节点重新生成" backfill, §6.3/§10). The live composer consumes them. */
-export function onComposePrefill(listener: (text: string) => void): () => void {
+export function onComposePrefill(listener: (text: string, sessionId: string) => void): () => void {
 	composeListeners.add(listener);
 	return () => composeListeners.delete(listener);
 }
