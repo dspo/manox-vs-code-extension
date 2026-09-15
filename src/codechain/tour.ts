@@ -1,4 +1,4 @@
-// Tour flattening (§6.3): the panel's 上一步/下一步 walk the tree in DFS
+// Tour flattening (§6.3): the panel's prev/next buttons walk the tree in DFS
 // preorder, skipping nodes the editor cannot jump to. Pure functions over
 // the model — the cursor itself lives with the panel host (tour.ts is the
 // O(n) source tested against fixtures).

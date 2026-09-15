@@ -182,8 +182,17 @@
       { "name": "ambiguous same-name", "draft": { "id": "f", "label": "deduct", "kind": "call", "file": "src/order/service.ts", "symbol": "deduct", "summary": "扣减" }, "status": "ambiguous" },
       { "name": "unresolved symbol", "draft": { "id": "c", "label": "phantom", "kind": "call", "file": "src/order/handler.ts", "symbol": "doesNotExist", "summary": "幻觉" }, "status": "unresolved" },
       { "name": "note without symbol", "draft": { "id": "d", "label": "事务边界", "kind": "note", "file": "src/order/service.ts", "summary": "回滚" }, "status": "ok" },
-      { "name": "file outside workspace", "draft": { "id": "e", "label": "x", "kind": "call", "file": "/etc/passwd", "symbol": "y", "summary": "越界" }, "status": "unresolved" }
-    ]
+      { "name": "file outside workspace (absolute)", "draft": { "id": "e", "label": "x", "kind": "call", "file": "/etc/passwd", "symbol": "y", "summary": "越界" }, "status": "unresolved" },
+      { "name": "relative path escape (../)", "draft": { "id": "g", "label": "conf", "kind": "config", "file": "../outside/settings.json", "symbol": "Settings", "summary": "逃逸" }, "status": "unresolved" },
+      { "name": "workspace-symbol fallback (cross-file unique)", "draft": { "id": "h", "label": "PaymentGateway", "kind": "interface", "file": "src/order/handler.ts", "symbol": "PaymentGateway", "summary": "跨文件" }, "status": "ok", "resolvedUri": "file:///repo/src/pay/gateway.ts" },
+      { "name": "text fallback is WEAK (ambiguous, never ok)", "draft": { "id": "i", "label": "legacyFlag", "kind": "call", "file": "src/order/service.ts", "symbol": "legacyFlag", "summary": "仅文本出现" }, "status": "ambiguous", "weak": true }
+    ],
+    "workspaceSymbols": {
+      "PaymentGateway": [ { "uri": "file:///repo/src/pay/gateway.ts", "name": "PaymentGateway", "range": { "startLine": 3, "startCharacter": 1, "endLine": 12, "endCharacter": 2 }, "selectionRange": { "startLine": 3, "startCharacter": 17, "endLine": 3, "endCharacter": 31 } } ]
+    },
+    "fileText": {
+      "file:///repo/src/order/service.ts": "export class OrderService {\n  const legacyFlag = false; // legacyFlag kept for rollout\n}\n"
+    }
   },
   "tour": {
     "order": ["handler.create", "service.create", "stock.validate", "stock.deduct", "event.emitted"],

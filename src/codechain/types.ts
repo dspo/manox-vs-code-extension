@@ -32,8 +32,9 @@ export type ResolveStatus =
 	 * Clicking attempts a live re-resolve before falling back (§10). */
 	| 'stale';
 
-/** Zero-based, character offsets — the LSP `Range` shape, kept plain so the
- * webview and the store never see vscode classes. */
+/** Zero-based character offsets — the LSP `Range` shape, kept plain so the
+ * webview and the store never see vscode classes. (The `textMatches` helper
+ * in resolve.ts emits these 0-based; display code adds the +1.) */
 export interface ChainRange {
 	startLine: number;
 	startCharacter: number;
@@ -67,6 +68,30 @@ export interface ChainNodeDraft {
 	children?: ChainNodeDraft[];
 }
 
+/** A resolved node's trusted position. Split out so the store validator
+ * (chainStore) and the panel share one shape definition. */
+export interface ChainLocation {
+	/** Document uri; empty for unresolved / note nodes with no file hit. */
+	uri: string;
+	/** Draft-relative path kept for display + the expansion dedup key
+	 * (`src/order/service.ts`); absent for host-expanded nodes. */
+	file?: string;
+	/** Symbol path used for live re-resolution (§10 click-time retry). */
+	symbolPath?: string[];
+	/** Full symbol range — present only when resolution succeeded; the
+	 * editor highlight covers the whole body (§6.3). Click-time re-parse may
+	 * refresh it. */
+	range?: ChainRange;
+	/** Name-only range (identifier span) when an LSP supplied it. The
+	 * call/type-hierarchy anchors resolve at this position: the full-range
+	 * start can sit on a JSDoc / decorator line where `prepareCallHierarchy`
+	 * returns nothing (review #8). Falls back to `range` when absent. */
+	selectionRange?: ChainRange;
+	resolveStatus: ResolveStatus;
+	/** Non-empty only for `ambiguous` (or the interface subtype seeds, §5). */
+	candidates?: ChainCandidate[];
+}
+
 /** Host output: every field the panel renders, positions LSP-verified. */
 export interface ResolvedNode {
 	id: string;
@@ -75,21 +100,7 @@ export interface ResolvedNode {
 	summary: string;
 	edgeNote?: string;
 	provenance: NodeProvenance;
-	location: {
-		/** Document uri; empty for unresolved / note nodes with no file hit. */
-		uri: string;
-		/** Draft-relative path kept for display (`src/order/service.ts`);
-		 * absent for host-expanded nodes (filename falls back). */
-		file?: string;
-		/** Symbol path used for live re-resolution (§10 click-time retry). */
-		symbolPath?: string[];
-		/** Present only when resolution succeeded; click-time re-parse may
-		 * refresh it. */
-		range?: ChainRange;
-		resolveStatus: ResolveStatus;
-		/** Non-empty only for `ambiguous`. */
-		candidates?: ChainCandidate[];
-	};
+	location: ChainLocation;
 	children: ResolvedNode[];
 }
 
@@ -114,8 +125,14 @@ export const MAX_SUMMARY_CHARS = 200;
 // ── panel message vocabulary (§6.4) ────────────────────────────────────────
 
 /** Host → panel. `chain` is the whole-tree message (open / refresh /
- * re-render); `sync` marks the node the active editor landed on; `tourState`
- * mirrors the tour cursor; `toast` surfaces a one-line status. */
+ * re-render / reveal-after-reload); `sync` marks the node the active editor
+ * landed on; `tourState` mirrors the tour cursor; `toast` surfaces a
+ * one-line status.
+ *
+ * DEVIATION from §6.4: the incremental `{t:'patch',ops}` channel was cut in
+ * v1 — every update re-sends the whole tree (≤80 nodes). The panel keeps
+ * selection / collapse / cursor across a re-send (§6.3 state preservation),
+ * so the full-tree push is behaviorally equivalent for its consumers. */
 export type ToPanel =
 	| { t: 'chain'; chain: CodeChain }
 	| { t: 'sync'; nodeId: string | null }
@@ -126,8 +143,12 @@ export type ToPanel =
  * panel); `tour` steps the DFS cursor; `pickCandidate` resolves an
  * ambiguity; `findRefs` opens a references lookup; `regen` backfills the
  * chain's question into the sidebar composer (§10 read-only reopen path);
- * `log` relays console diagnostics through the host log channel. */
+ * `ready` is emitted once at bundle mount — the host answers by re-sending
+ * the current snapshot, because `retainContextWhenHidden:false` lets VS
+ * Code discard the webview when the tab hides and a re-shown tab reloads to
+ * an empty React tree (review #1); `log` relays console diagnostics. */
 export type FromPanel =
+	| { t: 'ready' }
 	| { t: 'nodeClick'; nodeId: string; focus: boolean }
 	| { t: 'tour'; dir: 'prev' | 'next' }
 	| { t: 'refresh' }
