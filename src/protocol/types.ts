@@ -80,12 +80,16 @@ export type ClientCall =
 			reasoningEffort?: string;
 	  };
 
-/** One embedder-registered tool (`RegisterSessionTools`). */
+/** One embedder-registered tool (`RegisterSessionTools`). The Rust struct
+ * carries no `rename_all` (crates/manox-protocol/src/client.rs), so the wire
+ * keys are snake_case — `inputSchema`/`readOnly` would fail deserialization
+ * (`missing field input_schema`) or be silently dropped. builders.ts's
+ * `clientToolSpec` is the shaping face; guards.test pins the JSON keys. */
 export interface ClientToolSpec {
 	name: string;
 	description: string;
-	inputSchema: Record<string, unknown>;
-	readOnly?: boolean;
+	input_schema: Record<string, unknown>;
+	read_only?: boolean;
 }
 
 /** Capability a client can answer when the server issues a ServerCall

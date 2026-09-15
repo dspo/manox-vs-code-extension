@@ -8,8 +8,11 @@ import type { FromClient } from './types';
 import {
 	approveReply,
 	askUserQuestionReply,
+	clientToolReply,
+	clientToolSpec,
 	notification,
 	planVerdictReply,
+	registerSessionTools,
 	replyErr,
 	replyOk,
 	request,
@@ -56,6 +59,57 @@ describe('builders produce the exact serde shapes', () => {
 		expect(JSON.parse(JSON.stringify(notification({ method: 'cancelTurn', sessionId: 's1' })))).toEqual({
 			kind: 'notification',
 			note: { method: 'cancelTurn', sessionId: 's1' },
+		});
+	});
+
+	// RegisterSessionTools (client.rs): the ClientCall envelope is
+	// `rename_all_fields = "camelCase"` — `sessionId`/`clientId` on the call —
+	// but the `ClientToolSpec` struct carries NO rename_all, so its wire keys
+	// are snake_case. Sending `inputSchema` fails deserialization with
+	// `missing field input_schema`; `readOnly` would be silently dropped to
+	// false. These two tests are that boundary's lock.
+	it('registerSessionTools pins the mixed camelCase/snake_case wire', () => {
+		const call = registerSessionTools('s1', 'vscode-1', [
+			clientToolSpec({
+				name: 'GenCodeChain',
+				description: 'd',
+				inputSchema: { type: 'object' },
+				readOnly: true,
+			}),
+		]);
+		const json = JSON.parse(JSON.stringify(request('rpc-1', call)));
+		expect(json).toEqual({
+			kind: 'request',
+			id: 'rpc-1',
+			call: {
+				method: 'registerSessionTools',
+				sessionId: 's1',
+				clientId: 'vscode-1',
+				tools: [
+					{ name: 'GenCodeChain', description: 'd', input_schema: { type: 'object' }, read_only: true },
+				],
+			},
+		});
+	});
+
+	it('clientToolSpec omits read_only when unset (Rust defaults false)', () => {
+		expect(JSON.parse(JSON.stringify(clientToolSpec({ name: 't', description: 'd', inputSchema: {} })))).toEqual({
+			name: 't',
+			description: 'd',
+			input_schema: {},
+		});
+	});
+
+	it('InvokeClientTool replies carry the exact {content, isError} Ok payload', () => {
+		expect(JSON.parse(JSON.stringify(clientToolReply('r', 'text', false)))).toEqual({
+			kind: 'reply',
+			id: 'r',
+			outcome: { Ok: { content: 'text', isError: false } },
+		});
+		expect(JSON.parse(JSON.stringify(clientToolReply('r', 'boom', true)))).toEqual({
+			kind: 'reply',
+			id: 'r',
+			outcome: { Ok: { content: 'boom', isError: true } },
 		});
 	});
 });

@@ -8,12 +8,22 @@
 // Ready → registry pulls → CreateSession → follow (snapshot + projections) →
 // Submit receipt. No LLM turn is required; a state root without provider
 // config still exercises the whole control plane.
+//
+// A second case exercises the GenCodeChain `registerSessionTools` wire
+// against the real server — the snake_case `input_schema`/`read_only` shape
+// (guards.test pins it statically; this confirms the running serde reads it).
+// The full invoke round-trip additionally needs (a) a model turn and (b) the
+// dspo/manox PR that adds the ClientTool capability to the napi handshake —
+// neither is available in the staged lean addon, so the invoke assertion is
+// gated behind `MANOX_SMOKE_CLIENT_TOOL=1` and skipped by default.
 
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { AgentConnection, type Wire } from './client/connection';
+import { clientToolSpec, registerSessionTools } from './protocol/builders';
+import { clientToolSpecs } from './codechain/tools';
 import { parseFromServer } from './protocol/guards';
 import { NapiTransport } from './transport/napiTransport';
 
@@ -84,5 +94,72 @@ maybe('live smoke against the real agent server', { timeout: 60_000 }, () => {
 		}
 
 		handle.close();
+	});
+
+	// The client-tool registration contract against the running server (§9.1:
+	// the ClientToolSpec struct carries NO serde rename_all, so the wire keys
+	// are snake_case — a camelCase frame would fail `missing field
+	// input_schema`). Registration is not capability-gated, so this exercises
+	// the real deserialization path even on the staged lean addon.
+	it('registerSessionTools accepts the snake_case tool spec and reports the count', async () => {
+		const stateRoot = mkdtempSync(join(tmpdir(), 'manox-smoke-tools-'));
+		const toolTransport = NapiTransport.load({
+			sdkRoot: sdkRoot as string,
+			stateRoot,
+			clientId: 'vscode-smoke-tools',
+		});
+		const wire: Wire = {
+			send: (frame) => toolTransport.send(JSON.stringify(frame)),
+			onFrame: (handler) =>
+				toolTransport.onRaw((raw) => {
+					const frame = parseFromServer(JSON.parse(raw));
+					if (frame !== null) handler(frame);
+				}),
+		};
+		const conn = new AgentConnection(wire, { idPrefix: 'smoke-tools' });
+		try {
+			await conn.ready;
+			const sessionId = await conn.createSession({ cwd: stateRoot, approvalMode: 'read-only' });
+			const receipt = await conn.call(
+				registerSessionTools(
+					sessionId,
+					'vscode-smoke-tools',
+					clientToolSpecs().map(clientToolSpec),
+				),
+			);
+			// §9.1: the server echoes `{ registered: <n> }`.
+			expect(receipt).toMatchObject({ registered: clientToolSpecs().length });
+
+			// The invoke round-trip needs a model turn + the ClientTool
+			// capability on the napi handshake (dspo/manox PR): opt-in.
+			if (process.env.MANOX_SMOKE_CLIENT_TOOL === '1') {
+				let invoked = false;
+				const unsub = conn.onFrame((frame) => {
+					if (
+						frame.kind === 'request' &&
+						frame.call.method === 'invokeClientTool' &&
+						frame.call.name === 'GenCodeChain'
+					) {
+						invoked = true;
+						conn.sendRaw({
+							kind: 'reply',
+							id: frame.id,
+							outcome: { Ok: { content: JSON.stringify({ ok: true }), isError: false } },
+						});
+					}
+				});
+				await conn.submit(sessionId, '/codechain smoke');
+				// Best-effort wait for a turn to reach a tool call; a
+				// provider-less state root simply never invokes — the flag
+				// implies a configured model.
+				for (let i = 0; i < 60 && !invoked; i += 1) {
+					await new Promise((r) => setTimeout(r, 1000));
+				}
+				unsub();
+				expect(invoked).toBe(true);
+			}
+		} finally {
+			await toolTransport.dispose();
+		}
 	});
 });

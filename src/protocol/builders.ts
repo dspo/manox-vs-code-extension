@@ -6,6 +6,7 @@ import type {
 	AskAnswerRow,
 	ClientCall,
 	ClientNote,
+	ClientToolSpec,
 	FromClient,
 	AnswerKind,
 	RpcOutcome,
@@ -68,8 +69,42 @@ export const askUserQuestionReply = (id: string, rows: AskAnswerRow[]): FromClie
 		})),
 	});
 
-// Frequently-shaped Initialize (host-side diagnostics only — the napi binding
-// sends the real handshake itself).
+// ── client tools (RegisterSessionTools / InvokeClientTool) ─────────────────
+
+/** Shape one `ClientToolSpec` at the snake_case wire keys the Rust struct
+ * deserializes (no serde rename_all — see types.ts). The host-side input is
+ * camelCase; this is the single conversion face. */
+export const clientToolSpec = (tool: {
+	name: string;
+	description: string;
+	inputSchema: Record<string, unknown>;
+	readOnly?: boolean;
+}): ClientToolSpec => ({
+	name: tool.name,
+	description: tool.description,
+	input_schema: tool.inputSchema,
+	...(tool.readOnly !== undefined ? { read_only: tool.readOnly } : {}),
+});
+
+/** RegisterSessionTools replaces the client's whole tool set for the session
+ * (server-side is a full per-(session, clientId) swap; re-sending the
+ * complete list is the idempotent replay path). */
+export const registerSessionTools = (
+	sessionId: string,
+	clientId: string,
+	tools: ClientToolSpec[],
+): ClientCall => ({ method: 'registerSessionTools', sessionId, clientId, tools });
+
+/** The InvokeClientTool reply contract: the server reads exactly
+ * `{content, isError}` out of the Ok payload — `content` becomes the
+ * toolResult journal output, `isError: true` turns it into
+ * "execution failed: <content>" the model can self-correct against.
+ * Structured results ride as JSON in `content`. */
+export const clientToolReply = (id: string, content: string, isError: boolean): FromClient =>
+	replyOk(id, { content, isError });
+
+/** Frequently-shaped Initialize (host-side diagnostics only — the napi binding
+ * sends the real handshake itself). */
 
 export const initializeCall = (
 	clientId: string,
