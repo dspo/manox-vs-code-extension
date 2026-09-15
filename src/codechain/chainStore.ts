@@ -1,13 +1,21 @@
 // Chain registry + persistence (§7). Chains outlive their session: the
-// journal cards and the "重新生成" affordance reopen a panel from the stored
+// journal cards and the Regenerate affordance reopen a panel from the stored
 // row alone, so the store keeps whole `CodeChain` records keyed by chainId.
 //
 // The backing map is injected (`ChainStoreSink`) so the pure fold — keying,
-// caps, LRU eviction, list order — is testable without vscode; the host
-// wires it to `Memento` (workspaceState). §10: "会话销毁后点旧卡片" — nothing
-// here consults liveness.
+// caps, LRU eviction, list order, and SHAPE VALIDATION of read rows — is
+// testable without vscode; the host wires it to `Memento` (workspaceState).
+// §10: reopening a card after its session was disposed — nothing here
+//
+// Read-time validation matters because workspaceState is durable ACROSS
+// extension versions (review #11): a partially-written row, or one saved by
+// an older codechain build whose `CodeChain` shape has since changed, would
+// otherwise blind-cast to `CodeChain` and throw a TypeError the moment the
+// panel / quick-pick touches `chain.root.children` or `chain.stats`. Such a
+// row is dropped (and swept from the index) rather than crashing every
+// reopen path at once.
 
-import type { CodeChain } from './types';
+import type { ChainLocation, ChainRange, CodeChain, ResolvedNode } from './types';
 
 /** Minimal Memento face (vscode.Memento satisfies it structurally). */
 export interface ChainStoreSink {
@@ -33,6 +41,64 @@ export interface ChainSummary {
 	createdAt: number;
 }
 
+type Log = (message: string) => void;
+
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+	typeof v === 'object' && v !== null && !Array.isArray(v);
+const aStr = (v: unknown): v is string => typeof v === 'string';
+const aNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
+/** Structural validity of a stored range/location/node, defensively: the
+ * shape a live `CodeChain` guarantees, verified field-by-field so a bad row
+ * fails closed (→ dropped) rather than throwing at first touch. */
+function validRange(v: unknown): v is ChainRange {
+	return (
+		isRecord(v) &&
+		aNum(v.startLine) &&
+		aNum(v.startCharacter) &&
+		aNum(v.endLine) &&
+		aNum(v.endCharacter)
+	);
+}
+
+function validLocation(v: unknown): v is ChainLocation {
+	if (!isRecord(v) || !aStr(v.uri)) return false;
+	const status = v.resolveStatus;
+	if (
+		status !== 'ok' &&
+		status !== 'ambiguous' &&
+		status !== 'unresolved' &&
+		status !== 'stale'
+	) {
+		return false;
+	}
+	if (v.range !== undefined && !validRange(v.range)) return false;
+	if (v.selectionRange !== undefined && !validRange(v.selectionRange)) return false;
+	if (v.symbolPath !== undefined && !Array.isArray(v.symbolPath)) return false;
+	if (v.candidates !== undefined) {
+		if (!Array.isArray(v.candidates)) return false;
+		for (const c of v.candidates) {
+			if (!isRecord(c) || !aStr(c.uri) || !validRange(c.range)) return false;
+		}
+	}
+	return true;
+}
+
+function validNode(v: unknown): v is ResolvedNode {
+	if (!isRecord(v) || !aStr(v.id) || !aStr(v.label) || !aStr(v.kind) || !aStr(v.summary)) return false;
+	if (!validLocation(v.location)) return false;
+	if (!Array.isArray(v.children)) return false;
+	return v.children.every(validNode);
+}
+
+function validChain(v: unknown): v is CodeChain {
+	if (!isRecord(v)) return false;
+	if (!aStr(v.chainId) || !aStr(v.sessionId) || !aStr(v.title) || !aStr(v.question)) return false;
+	if (!aNum(v.createdAt) || !isRecord(v.stats)) return false;
+	if (!aNum(v.stats.nodeCount) || !aNum(v.stats.unresolvedCount)) return false;
+	return validNode(v.root);
+}
+
 /** Index rows are append-order; the summary list renders newest-first. */
 function readIndex(sink: ChainStoreSink): string[] {
 	const raw = sink.get<unknown>(INDEX_KEY);
@@ -40,7 +106,10 @@ function readIndex(sink: ChainStoreSink): string[] {
 }
 
 export class ChainStore {
-	constructor(private readonly sink: ChainStoreSink) {}
+	constructor(
+		private readonly sink: ChainStoreSink,
+		private readonly log: Log = () => undefined,
+	) {}
 
 	/** Insert or replace a chain; evicts oldest rows past the cap. The
 	 * update promise is fire-and-forget (Memento writes are durable-async;
@@ -57,14 +126,26 @@ export class ChainStore {
 		this.sink.update(INDEX_KEY, next);
 	}
 
+	/** Read one chain, verifying the stored shape; a corrupt / stale-version
+	 * row is dropped + swept from the index rather than returned (review #11). */
 	get(chainId: string): CodeChain | undefined {
-		return this.sink.get<CodeChain>(`${CHAIN_KEY_PREFIX}${chainId}`);
+		const key = `${CHAIN_KEY_PREFIX}${chainId}`;
+		const raw = this.sink.get<unknown>(key);
+		if (raw === undefined) return undefined;
+		if (!validChain(raw)) {
+			this.log(`dropping corrupt stored chain ${chainId} (shape mismatch)`);
+			void this.sink.delete(key);
+			const index = readIndex(this.sink).filter((id) => id !== chainId);
+			this.sink.update(INDEX_KEY, index);
+			return undefined;
+		}
+		return raw;
 	}
 
 	list(sessionId?: string): ChainSummary[] {
 		const out: ChainSummary[] = [];
 		for (const chainId of readIndex(this.sink)) {
-			const chain = this.get(chainId);
+			const chain = this.get(chainId); // validates + self-heals bad rows
 			if (!chain) continue;
 			if (sessionId !== undefined && chain.sessionId !== sessionId) continue;
 			out.push({
@@ -91,12 +172,12 @@ export class ChainStore {
  * refold. Returns the new root plus the replaced node (null id → no-op).
  * Ids are unique per §4 validation, so the first DFS hit is THE node. */
 export function replaceNode(
-	root: CodeChain['root'],
+	root: ResolvedNode,
 	nodeId: string,
-	next: (node: CodeChain['root']) => CodeChain['root'],
-): { root: CodeChain['root']; found: boolean } {
+	next: (node: ResolvedNode) => ResolvedNode,
+): { root: ResolvedNode; found: boolean } {
 	if (root.id === nodeId) return { root: next(root), found: true };
-	const walk = (node: CodeChain['root']): { value: CodeChain['root']; found: boolean } => {
+	const walk = (node: ResolvedNode): { value: ResolvedNode; found: boolean } => {
 		let found = false;
 		const children = node.children.map((child) => {
 			const hit = child.id === nodeId ? { value: next(child), found: true } : walk(child);
@@ -113,7 +194,7 @@ export function replaceNode(
 export function withStats(chain: CodeChain): CodeChain {
 	let nodeCount = 0;
 	let unresolvedCount = 0;
-	const walk = (node: CodeChain['root']): void => {
+	const walk = (node: ResolvedNode): void => {
 		nodeCount += 1;
 		if (node.location.resolveStatus === 'unresolved') unresolvedCount += 1;
 		for (const child of node.children) walk(child);

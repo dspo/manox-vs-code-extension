@@ -116,3 +116,39 @@ function find(node: ResolvedNode, id: string): ResolvedNode | undefined {
 	}
 	return undefined;
 }
+
+// Review #11: workspaceState is durable across versions, so a partial write
+// or an older-row shape must degrade to "not present" (and be swept), never
+// throw when the panel / quick-pick touches the row.
+describe('ChainStore row validation (corrupt / stale-version rows)', () => {
+	it('a malformed row is dropped + swept from the index, and the log fires', () => {
+		const sink = fakeSink();
+		const logs: string[] = [];
+		const store = new ChainStore(sink, (m) => logs.push(m));
+		// Hand-plant a broken row: index lists it, payload has no `root`.
+		sink.update('manox.codechain.index', ['bad']);
+		sink.update('manox.codechain.bad', { chainId: 'bad', sessionId: 's1', title: 'x' });
+		expect(store.get('bad')).toBeUndefined();
+		expect(logs.some((l) => l.includes('corrupt'))).toBe(true);
+		// The index no longer lists the bad row.
+		expect(store.list()).toEqual([]);
+		expect((sink.rows.get('manox.codechain.index') as string[])).toEqual([]);
+	});
+
+	it('a location with a bad resolveStatus invalidates the whole row', () => {
+		const sink = fakeSink();
+		const store = new ChainStore(sink, () => undefined);
+		const broken = JSON.parse(JSON.stringify(baseChain)) as {
+			root: { location: { resolveStatus: string } };
+		};
+		broken.root.location.resolveStatus = 'wat';
+		store.save(broken as unknown as typeof baseChain);
+		expect(store.get(baseChain.chainId)).toBeUndefined();
+	});
+
+	it('a valid row round-trips unchanged', () => {
+		const store = new ChainStore(fakeSink());
+		store.save(baseChain);
+		expect(store.get(baseChain.chainId)).toEqual(baseChain);
+	});
+});

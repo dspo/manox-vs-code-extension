@@ -11,8 +11,17 @@
 //     the `sessionCreated` ServerNote, observed on the frame bus);
 //   - every session the sidebar follows (`streamOpen(followSession)` — the
 //     webview's open path, hooked from the sidebar provider);
-//   - everything the thread registry reports, once `connection.ready` lands
-//     (host restart: the server hands back the sessions it still has).
+//   - everything the thread registry reports, once `connection.ready` lands.
+//
+// The `registered` guard is deliberately NOT a permanent set (review #4):
+// server-side registration is in-memory and a session can be disposed and
+// cold-reopened under the SAME id, which must re-register. The controller
+// keeps only an in-flight guard plus a failed-retry tombstone, and clears on
+// `sessionDisposed`. The whole replace-per-register makes redundant calls
+// harmless, so this errs toward re-sending.
+//
+// The registrar is extracted (`SessionToolRegistrar`) and vscode-free so a
+// unit test can drive the exact lifecycle against a fake host (#19).
 //
 // The no-workspace-folder case (§10) skips registration with a log: the
 // tools would fail every file resolution anyway, and an unregistered tool
@@ -28,8 +37,11 @@ import { ChainStore } from './chainStore';
 import { CodeChainPanel } from './panel';
 import { vscodeWorkspaceView, VscodeLspClient } from './lspClient';
 import { ChainNavigation } from './navigation';
+import { SessionToolRegistrar } from './sessionRegistrar';
 import { clientToolSpecs, CodeChainTools, type InvokeCall, type ReplySinks } from './tools';
 import type { ResolveDeps } from './resolve';
+
+// ── process-wide service ────────────────────────────────────────────────────
 
 interface CodeChainService {
 	readonly tools: CodeChainTools;
@@ -39,7 +51,7 @@ interface CodeChainService {
 	listChains(): ReturnType<ChainStore['list']>;
 }
 
-let service: CodeChainService | null = null;
+let service: (CodeChainService & { dispose(): void }) | null = null;
 
 /** Invoke sink for the host's `invokeClientTool` interceptor branch
  * (agentHost.ts). Returns false when the name is not a code-chain tool. */
@@ -56,12 +68,9 @@ export function ensureCodeChain(context: ExtensionContext, host: AgentHost): voi
 	const log = (message: string): void => {
 		host.log.info(`codechain: ${message}`);
 	};
-
-	// §10: tools are useless without a workspace; skip registration, keep
-	// the open/replay surfaces alive (old chains still render).
 	const hasWorkspace = (): boolean => (vscode.workspace.workspaceFolders?.length ?? 0) > 0;
 
-	const store = new ChainStore(toSink(context.workspaceState));
+	const store = new ChainStore(toSink(context.workspaceState), log);
 	const deps: ResolveDeps = {
 		lsp: new VscodeLspClient(),
 		workspace: vscodeWorkspaceView(),
@@ -70,92 +79,65 @@ export function ensureCodeChain(context: ExtensionContext, host: AgentHost): voi
 	};
 	const navigation = new ChainNavigation(log);
 
-	let tools: CodeChainTools;
-	let panel: CodeChainPanel;
-	tools = new CodeChainTools(deps, store, {
+	const panel = new CodeChainPanel(context, store, navigation, () => tools, {
+		compose: (text, sessionId) => {
+			void vscode.commands.executeCommand('manox.chatView.focus');
+			postToSidebar({ t: 'verb', kind: 'compose', text, sessionId });
+		},
+		log,
+	});
+	const tools = new CodeChainTools(deps, store, {
 		showChain: (chain) => panel.show(chain),
 		updateChain: (chain) => panel.update(chain),
 		verb: (note) => postToSidebar({ t: 'verb', kind: 'code_chain', ...note }),
 		log,
 	});
-	panel = new CodeChainPanel(context, store, navigation, () => tools, {
-		compose: (text) => {
-			void vscode.commands.executeCommand('manox.chatView.focus');
-			postToSidebar({ t: 'verb', kind: 'compose', text });
-		},
+
+	const registrar = new SessionToolRegistrar({
+		send: (sessionId, specs) => host.connection.call(registerSessionTools(sessionId, host.clientId, specs)),
+		hasWorkspace,
 		log,
+		tools: () => clientToolSpecs().map(clientToolSpec),
 	});
 
-	const registered = new Set<string>();
-	const registerSession = (sessionId: string): void => {
-		if (!sessionId) return;
-		if (!hasWorkspace()) {
-			log('no workspace folder — client tools not registered');
-			return;
+	const replayReady = async (): Promise<void> => {
+		try {
+			const threads = await host.connection.listThreads();
+			for (const thread of threads) registrar.registerSession(thread.id);
+			log(`ready replay: ${threads.length} session(s)`);
+		} catch (e) {
+			log(`ready replay failed: ${String(e)}`);
 		}
-		if (registered.has(sessionId)) return;
-		registered.add(sessionId);
-		void host.connection
-			.call(
-				registerSessionTools(
-					sessionId,
-					host.clientId,
-					clientToolSpecs().map(clientToolSpec),
-				),
-			)
-			.then(
-				(receipt) => log(`client tools registered for ${sessionId}: ${JSON.stringify(receipt)}`),
-				(e) => {
-					registered.delete(sessionId); // a retry (next lifecycle edge) may succeed
-					log(`registerSessionTools(${sessionId}) failed: ${String(e)}`);
-				},
-			);
 	};
+	void host.connection.ready.then(replayReady);
+
+	// Lifecycle edges on the frame bus (module header). `sessionCreated`
+	// covers every creator including the webview's own sessions;
+	// `sessionDisposed` frees the registrar so a same-id re-open re-registers.
+	const unsubFrames = host.connection.onFrame((frame) => {
+		if (frame.kind !== 'notification') return;
+		if (frame.note.method === 'sessionCreated') registrar.registerSession(frame.note.sessionId);
+		else if (frame.note.method === 'sessionDisposed') registrar.onSessionDisposed(frame.note.sessionId);
+	});
+
+	// The reverse-sync watcher attaches inside the panel constructor (once
+	// for the service lifetime); nothing else to wire per panel.
 
 	service = {
 		tools,
-		registerSession,
+		registerSession: (id) => registrar.registerSession(id),
 		openChain: (chainId) => panel.openChain(chainId),
 		stepTour: (dir) => panel.stepTour(dir),
 		listChains: () => store.list(),
-	};
-
-	// Lifecycle edges (module header). `sessionCreated` covers every session
-	// on the bus — including the webview's own, which never touches the host
-	// participant path.
-	void host.connection.ready.then(() => replayReady(host, registerSession, log));
-	host.connection.onFrame((frame) => {
-		if (frame.kind === 'notification' && frame.note.method === 'sessionCreated') {
-			registerSession(frame.note.sessionId);
-		}
-	});
-
-	context.subscriptions.push({
 		dispose: () => {
+			unsubFrames();
 			navigation.dispose();
 			panel.dispose();
 			service = null;
 		},
-	});
+	};
+	context.subscriptions.push({ dispose: () => service?.dispose() });
 	log('service installed');
-}
-
-/** Re-pull the thread registry after `ready`: registration accepts sessions
- * the server already owns (and idempotent replaces make re-registering
- * free), which covers both host restarts and sessions created while the
- * extension host was down (§9.2 replay rule). */
-async function replayReady(
-	host: AgentHost,
-	registerSession: (sessionId: string) => void,
-	log: (message: string) => void,
-): Promise<void> {
-	try {
-		const threads = await host.connection.listThreads();
-		for (const thread of threads) registerSession(thread.id);
-		log(`ready replay: ${threads.length} session(s)`);
-	} catch (e) {
-		log(`ready replay failed: ${String(e)}`);
-	}
 }
 
 /** Sidebar follow-stream claim hook (sidebarProvider.trackStream): the

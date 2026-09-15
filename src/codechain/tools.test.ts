@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 import fixtures from '../../test-fixtures/codechain-cases.json';
 import { ChainStore, type ChainStoreSink } from './chainStore';
 import type { CodeChain, ChainNodeDraft } from './types';
-import type { LspClient, LspItem, LspSymbol, ResolveDeps, WorkspaceView } from './resolve';
+import type { LspClient, LspItem, LspLocation, LspSymbol, ResolveDeps, WorkspaceView } from './resolve';
 import { CodeChainTools, clientToolSpecs, type InvokeCall, type ReplySinks, type ToolSinks } from './tools';
 
 const symbolsByUri = fixtures.resolve.symbols as Record<string, LspSymbol[]>;
@@ -21,6 +21,12 @@ const emptyLsp: LspClient = {
 	},
 	async readText() {
 		return '';
+	},
+	// No workspace index in the tools tests: the `okRoot`/`failingChild`
+	// fixtures are chosen so the document-symbol tree alone decides ok vs
+	// unresolved. The index fallback itself is covered in resolve.test.
+	async workspaceSymbols(): Promise<LspLocation[]> {
+		return [];
 	},
 	async prepareCallHierarchy(): Promise<LspItem[]> {
 		return [];
@@ -51,6 +57,8 @@ const emptyLsp: LspClient = {
 const workspace: WorkspaceView = {
 	folders: () => ['/repo'],
 	fileExists: async (abs) => existingFiles.has(abs.replace(/^\/repo\//, '')),
+	toUri: (abs) => `file://${abs.startsWith('/') ? '' : '/'}${abs}`,
+	toPath: (uri) => (uri.startsWith('file:///') ? `/${uri.slice('file://'.length)}` : null),
 };
 
 const deps: ResolveDeps = { lsp: emptyLsp, workspace, mintChainId: () => 'cc-1', now: () => 1 };
@@ -257,4 +265,30 @@ describe('Expand / Annotate / Refresh', () => {
 		const handled = await tools.handle(call('SomeOtherTool', {}), reply().sinks);
 		expect(handled).toBe(false);
 	});
+});
+
+// Review #5: `handle()` claims the call (returns true), so a non-object or
+// chainId-less input MUST still be answered — a silent return would leave
+// the server waiting its full 300s (un-cancellable) timeout.
+describe('every tool answers non-object / missing-chainId input (review #5)', () => {
+	const toolsSuite: [string, unknown][] = [
+		['ExpandCodeChainNode', null],
+		['AnnotateCodeChainNode', 'a string'],
+		['RefreshCodeChain', 42],
+		['ExpandCodeChainNode', { chainId: 'nope' }],
+		['AnnotateCodeChainNode', {}],
+		['RefreshCodeChain', { chainId: 'ghost' }],
+	];
+	for (const [name, input] of toolsSuite) {
+		it(`${name} with input ${JSON.stringify(input)} replies without hanging`, async () => {
+			const { tools, reply } = makeTools();
+			const r = reply();
+			const handled = await tools.handle(call(name, input), r.sinks);
+			expect(handled).toBe(true);
+			expect(r.calls).toHaveLength(1);
+			// Business failures ride Ok { content, isError:true }; a truly
+			// unparseable frame may Err — either way, exactly one reply.
+			expect(r.calls[0]).toBeTruthy();
+		});
+	}
 });

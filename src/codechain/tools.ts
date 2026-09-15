@@ -27,6 +27,7 @@ import type {
 import { MAX_SUMMARY_CHARS } from './types';
 import {
 	expandNode,
+	expansionKey,
 	resolveChain,
 	resolveSymbol,
 	validateDraft,
@@ -285,9 +286,9 @@ export class CodeChainTools {
 	// ── ExpandCodeChainNode ─────────────────────────────────────────────────
 
 	private async expand(call: InvokeCall, reply: ReplySinks): Promise<void> {
-		const input = asRecord(call.input);
-		const chain = input ? this.load(input, reply) : null;
-		if (!chain || !input) return;
+		const loaded = this.chainOf(call, reply, 'ExpandCodeChainNode');
+		if (!loaded) return;
+		const { input, chain } = loaded;
 		const nodeId = asString(input.nodeId);
 		const direction = asString(input.direction);
 		if (!nodeId || (direction !== 'callees' && direction !== 'callers')) {
@@ -295,22 +296,21 @@ export class CodeChainTools {
 		}
 		const target = findNode(chain.root, nodeId);
 		if (!target) return fail(reply, { ok: false, error: `no node \`${nodeId}\` in chain \`${chain.chainId}\`` });
-		// Dedup identity (§resolve.expandNode): `label@file`, not the tree
-		// ids — the LLM slugs and the `callees:`-prefixed expansion ids
-		// share no structure, so only the human key can match.
+		// Dedup identity (§resolve.expansionKey): `label@<relative-path>` —
+		// the LLM slugs and the `callees:`-prefixed expansion ids share no
+		// structure, so only the normalized graph key can match.
 		const existing = new Set<string>();
 		for (const node of flatten(chain.root)) {
-			if (node.location.uri) {
-				existing.add(`${node.label}@${node.location.uri.split('/').pop() ?? ''}`);
-			}
+			if (node.location.uri) existing.add(expansionKey(this.deps.workspace, node.label, node.location.uri));
 		}
-		const outcome = await expandNode(this.deps.lsp, target, direction, existing);
+		const outcome = await expandNode(this.deps.lsp, this.deps.workspace, target, direction, existing);
 		if (outcome.error) return fail(reply, { ok: false, error: outcome.error });
 		if (outcome.added.length === 0) {
 			return ok(reply, { ok: true, chainId: chain.chainId, added: [], note: 'no new edges at this level' });
 		}
 		const depth = typeof input.depth === 'number' ? Math.max(1, Math.min(3, input.depth)) : 1;
 		// `depth > 1` is a documented v1 clamp: one real expansion per call.
+		// The hierarchy item's `range` is already its selectionRange.
 		const addedNodes: ResolvedNode[] = outcome.added.map((a) => ({
 			id: a.id,
 			label: a.label,
@@ -318,7 +318,12 @@ export class CodeChainTools {
 			summary: '',
 			edgeNote: direction === 'callees' ? 'real call edge' : 'real caller edge',
 			provenance: a.provenance,
-			location: { uri: a.uri, range: a.range, resolveStatus: 'ok' as const },
+			location: {
+				uri: a.uri,
+				range: a.range,
+				selectionRange: a.range,
+				resolveStatus: 'ok' as const,
+			},
 			children: [],
 		}));
 		const next = withStats({
@@ -339,9 +344,9 @@ export class CodeChainTools {
 	// ── AnnotateCodeChainNode ───────────────────────────────────────────────
 
 	private annotate(call: InvokeCall, reply: ReplySinks): void {
-		const input = asRecord(call.input);
-		const chain = input ? this.load(input, reply) : null;
-		if (!chain || !input) return;
+		const loaded = this.chainOf(call, reply, 'AnnotateCodeChainNode');
+		if (!loaded) return;
+		const { input, chain } = loaded;
 		const nodeId = asString(input.nodeId);
 		const summary = asString(input.summary);
 		const edgeNote = asString(input.edgeNote);
@@ -369,9 +374,9 @@ export class CodeChainTools {
 	 * a moved range reports as moved; ok→miss reports as stale; anything→hit
 	 * reports as fixed. Positions the model never claimed are untouched. */
 	private async refresh(call: InvokeCall, reply: ReplySinks): Promise<void> {
-		const input = asRecord(call.input);
-		const chain = input ? this.load(input, reply) : null;
-		if (!chain || !input) return;
+		const loaded = this.chainOf(call, reply, 'RefreshCodeChain');
+		if (!loaded) return;
+		const { chain } = loaded;
 		const moved: string[] = [];
 		const stale: string[] = [];
 		const fixed: string[] = [];
@@ -426,15 +431,28 @@ export class CodeChainTools {
 
 	// ── shared plumbing ─────────────────────────────────────────────────────
 
-	private load(input: Record<string, unknown>, reply: ReplySinks): CodeChain | null {
+	/** Validate the object-input + chainId and load the stored chain, or
+	 * answer `reply` and return null. Every non-object / missing-chainId
+	 * path MUST reply: `handle()` has already claimed the call, so a silent
+	 * `return` here would leave the server waiting the full 300s
+	 * (un-cancellable per §9.3) — review #5. */
+	private chainOf(call: InvokeCall, reply: ReplySinks, toolName: string): { input: Record<string, unknown>; chain: CodeChain } | null {
+		const input = asRecord(call.input);
+		if (!input) {
+			failText(reply, `${toolName} input must be an object`);
+			return null;
+		}
 		const chainId = asString(input.chainId);
 		if (!chainId) {
-			failText(reply, 'the input needs a `chainId` from the client_GenCodeChain result');
+			failText(reply, `${toolName} needs a \`chainId\` from the client_GenCodeChain result`);
 			return null;
 		}
 		const chain = this.store.get(chainId);
-		if (!chain) fail(reply, { ok: false, error: `unknown chainId \`${chainId}\` — generate one first with client_GenCodeChain` });
-		return chain ?? null;
+		if (!chain) {
+			fail(reply, { ok: false, error: `unknown chainId \`${chainId}\` — generate one first with client_GenCodeChain` });
+			return null;
+		}
+		return { input, chain };
 	}
 }
 

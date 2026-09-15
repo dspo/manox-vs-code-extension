@@ -39,12 +39,13 @@ export type ToHost =
  * The `code_chain` verb is the out-of-band journal-card push (§7: a tool
  * invocation by THIS host has no webview-visible side effect otherwise);
  * `compose` backfills the composer with a `/codechain …` question (§10
- * read-only reopen path). */
+ * read-only reopen path); it carries the originating sessionId so the
+ * composer can verify it belongs to the thread on screen (review #16). */
 export type ToWebview =
 	| { t: 'frame'; frame: FromServer }
 	| { t: 'verb'; kind: 'new_session' | 'open_turn_navigator' }
 	| { t: 'verb'; kind: 'code_chain'; sessionId: string; chainId: string; title: string; nodeCount: number }
-	| { t: 'verb'; kind: 'compose'; text: string }
+	| { t: 'verb'; kind: 'compose'; text: string; sessionId: string }
 	| { t: 'config'; approvalMode: string }
 	| { t: 'boot'; cwd: string; approvalMode: string }
 	| { t: 'fatal'; message: string };
