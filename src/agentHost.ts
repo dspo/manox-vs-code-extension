@@ -7,10 +7,11 @@
 
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
-import { AgentConnection, type Wire } from './client/connection';
+import { AgentConnection, type HostCallInterceptor, type Wire } from './client/connection';
 import type { ApprovalMode } from './protocol/types';
 import { parseFromServer } from './protocol/guards';
 import { DEFAULT_STATE_ROOT, NapiTransport, resolveSdkRoot } from './transport/napiTransport';
+import { errorText } from './util';
 
 /** §D.2 Initialize identity: minted once, persisted in globalState, replayed
  * on every activation so window reloads and transport re-inits re-seat the
@@ -46,6 +47,57 @@ export function configuredStateRoot(): string {
 
 function configuredSdkRoot(): string {
 	return vscode.workspace.getConfiguration('manox').get<string>('sdkRoot') ?? '';
+}
+
+/** Host-owned capability answers (manox #792: the napi edge declares
+ * ClipboardRead / OpenExternal / ClientTool for this host, so the server now
+ * routes those ServerCalls here — they are process capabilities, never
+ * webview cards).
+ *
+ * - clipboardRead → text-only bridge per the server contract: `{data: base64,
+ *   mimeType}` or null when empty (the kernel fails closed on non-text, so
+ *   anything we cannot express as UTF-8 text answers null).
+ * - openExternal → `vscode.env.openExternal`, reply `{}`. The agent's Open
+ *   tool is approval-gated upstream (host_tools), so the wire call arrives
+ *   already authorized by the user.
+ * - clientTool → declared but inert: invokeClientTool is only routed to a
+ *   client that registered tools (registerSessionTools); this host registers
+ *   none yet, and any stray delivery falls through to the fail-closed reply. */
+function hostCallInterceptor(log: vscode.LogOutputChannel): HostCallInterceptor {
+	return (call, _id, reply) => {
+		switch (call.method) {
+			case 'clipboardRead': {
+				void vscode.env.clipboard.readText().then(
+					(text) => {
+						if (text === '') reply.ok(null);
+						else reply.ok({ data: Buffer.from(text, 'utf8').toString('base64'), mimeType: 'text/plain' });
+					},
+					(e) => reply.err(`manox: clipboard read failed: ${errorText(e)}`),
+				);
+				return true;
+			}
+			case 'openExternal': {
+				let uri: vscode.Uri;
+				try {
+					uri = vscode.Uri.parse(call.url, true);
+				} catch (e) {
+					reply.err(`manox: unparseable external URL: ${errorText(e)}`);
+					return true;
+				}
+				void vscode.env.openExternal(uri).then(
+					(opened) => {
+						if (opened) reply.ok({});
+						else reply.err(`manox: no handler for external URL: ${call.url}`);
+					},
+					(e) => reply.err(`manox: openExternal failed: ${errorText(e)}`),
+				);
+				return true;
+			}
+			default:
+				log.debug(`host interceptor: not a host capability: ${call.method}`);
+				return false;
+		}
+	};
 }
 
 export class AgentHost {
@@ -111,6 +163,7 @@ export class AgentHost {
 		};
 		this.connection = new AgentConnection(wire, {
 			idPrefix: 'host',
+			hostCalls: hostCallInterceptor(this.log),
 			onDroppedFrame: (raw) => this.log.debug(`dropping frame: ${JSON.stringify(raw).slice(0, 400)}`),
 		});
 	}

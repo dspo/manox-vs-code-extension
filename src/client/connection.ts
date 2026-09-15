@@ -43,12 +43,29 @@ export type UnroutedCallPolicy = 'deny' | 'observe';
 
 export type ServerCallHandler = (call: ServerCall, id: MsgId) => void;
 
+/** Host-level ServerCall interceptor, consulted BEFORE per-session routing:
+ * returns true when it answered the call (replied through the provided
+ * sinks). This is where process-owned capabilities live (clipboardRead /
+ * openExternal) — they must be answered even for a viewed session whose
+ * no-op shield claims card ownership, and never surface as webview cards. */
+export type HostCallInterceptor = (
+	call: ServerCall,
+	id: MsgId,
+	reply: {
+		ok(payload: unknown): void;
+		err(message: string): void;
+	},
+) => boolean;
+
 export interface AgentConnectionOptions {
 	readonly idPrefix: string;
 	/** Unrouted ServerCall policy (default `deny`). */
 	readonly unroutedCalls?: UnroutedCallPolicy;
 	/** Wire-frame log/drop sink for version-skew diagnostics (guards). */
 	readonly onDroppedFrame?: (raw: unknown) => void;
+	/** Host-owned capability answers (host instance only; the webview relay
+	 * leaves this unset and ignores the frames it cannot answer). */
+	readonly hostCalls?: HostCallInterceptor;
 }
 
 interface PendingCall {
@@ -245,6 +262,17 @@ export class AgentConnection {
 			}
 			case 'request': {
 				const call = frame.call;
+				// Host-owned capabilities answer first — before the per-session
+				// shield claims the delivery (a viewed session's no-op handler
+				// would otherwise swallow clipboardRead/openExternal into a
+				// server-side timeout).
+				if (this.options.hostCalls) {
+					const answered = this.options.hostCalls(call, frame.id, {
+						ok: (payload) => this.wire.send({ kind: 'reply', id: frame.id, outcome: { Ok: payload } }),
+						err: (message) => this.wire.send(replyErr(frame.id, message)),
+					});
+					if (answered) return;
+				}
 				const sessionId = call.sessionId;
 				const handler = this.callHandlers.get(sessionId);
 				if (handler) {

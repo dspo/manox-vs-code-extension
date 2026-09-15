@@ -166,6 +166,45 @@ describe('AgentConnection over a scripted wire', () => {
 		conn.setCallHandler('s9', null);
 	});
 
+	it('hostCalls intercepts before per-session routing (capability calls)', () => {
+		const wire = new FakeWire();
+		const conn = new AgentConnection(wire, {
+			idPrefix: 'host',
+			hostCalls: (call, _id, reply) => {
+				if (call.method === 'clipboardRead') {
+					reply.ok({ data: Buffer.from('hi', 'utf8').toString('base64'), mimeType: 'text/plain' });
+					return true;
+				}
+				if (call.method === 'openExternal') {
+					reply.err('no handler');
+					return true;
+				}
+				return false;
+			},
+		});
+		// A viewed session's no-op shield must NOT swallow capability calls.
+		const shielded: string[] = [];
+		conn.setCallHandler('s1', (call) => shielded.push(call.method));
+
+		wire.feed({ kind: 'request', id: 'cap-1', call: { method: 'clipboardRead', sessionId: 's1' } });
+		expect(wire.sent.at(-1)).toMatchObject({
+			kind: 'reply',
+			id: 'cap-1',
+			outcome: { Ok: { data: 'aGk=', mimeType: 'text/plain' } },
+		});
+
+		wire.feed({ kind: 'request', id: 'cap-2', call: { method: 'openExternal', sessionId: 's1', url: 'https://x' } });
+		expect(wire.sent.at(-1)).toMatchObject({ kind: 'reply', id: 'cap-2', outcome: { Err: expect.objectContaining({ message: 'no handler' }) } });
+
+		// Non-capability calls still route to the session shield untouched.
+		wire.feed({
+			kind: 'request',
+			id: 'cap-3',
+			call: { method: 'approve', deliveryId: 'd', sessionId: 's1', authId: 'a', toolName: 'bash', summary: '', input: {} },
+		});
+		expect(shielded).toEqual(['approve']);
+	});
+
 	it('observe policy never auto-answers (the webview consumer)', () => {
 		const wire = new FakeWire();
 		const conn = new AgentConnection(wire, { idPrefix: 'web', unroutedCalls: 'observe' });
