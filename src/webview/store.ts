@@ -9,6 +9,7 @@ import { parseFromServer } from '../protocol/guards';
 import { errorText } from '../util';
 import type {
 	ApprovalMode,
+	AskAnswerRow,
 	AskQuestionWire,
 	FromClient,
 	ModelInfo,
@@ -227,14 +228,25 @@ export class ChatApp {
 		this.dropCard(card.id);
 	}
 
-	answerQuestion(answers: [string, string][], response: string | null): void {
+	/** Canonical B2-PR-1 answer: one row per parked question, routed by id;
+	 * an untouched question answers as skip (empty selected, no custom). */
+	answerQuestion(rows: AskAnswerRow[]): void {
 		const card = this.cards[0];
 		if (!card || card.call.method !== 'askUserQuestion') return;
-		this.connection.sendRaw({ kind: 'reply', id: card.id, outcome: { Ok: { answers, response } } });
+		const answered = new Set(rows.map((row) => row.id));
+		const full = [
+			...rows,
+			...this.questionsOf(card)
+				.filter((q) => q.id && !answered.has(q.id))
+				.map((q) => ({ id: q.id as string, selected: [] as string[] })),
+		];
+		this.connection.sendRaw({ kind: 'reply', id: card.id, outcome: { Ok: { answers: full } } });
 		this.dropCard(card.id);
 	}
 
-	/** Parse an askUserQuestion payload (UI-side projection; tolerant). */
+	/** Parse an askUserQuestion payload (L1 vocabulary; tolerant): every
+	 * wire question should carry a minted `id` — one without is unusable for
+	 * canonical routing and renders as informational only. */
 	questionsOf(card: PendingCard): AskQuestionWire[] {
 		if (card.call.method !== 'askUserQuestion') return [];
 		const input = card.call.input;

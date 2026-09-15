@@ -276,13 +276,15 @@ export function createRenderer(app: ChatApp): Renderer {
 						questions
 							.map(
 								(q) => `
-						<div class="question">
+						<div class="question" data-qid="${escapeAttr(q.id ?? '')}">
 							<div class="question-text">${escapeHtml(q.question)}</div>
+							${q.detail ? `<div class="question-detail md">${renderMarkdown(q.detail)}</div>` : ''}
+							${q.intent?.approve ? `<div class="question-intent">intent: ${escapeHtml(q.intent.kind)}${q.intent.approve ? ` — approving: “${escapeHtml(q.intent.approve)}”` : ''}</div>` : ''}
 							<div class="question-options">
-								${q.options
+								${(q.options ?? [])
 									.map(
 										(opt) =>
-											`<button class="btn" data-q="${escapeAttr(q.question)}" data-a="${escapeAttr(opt.label)}">${escapeHtml(opt.label)}${opt.recommended ? ' ✓' : ''}</button>`,
+											`<button class="btn" data-id="${escapeAttr(q.id ?? '')}" data-a="${escapeAttr(opt.label)}">${escapeHtml(opt.label)}${opt.recommended ? ' ✓' : ''}</button>`,
 									)
 									.join('')}
 							</div>
@@ -290,10 +292,38 @@ export function createRenderer(app: ChatApp): Renderer {
 							)
 							.join('') || '<div class="question-text">(unsupported payload)</div>'
 					}</div>
+					<div class="card-actions">
+						<button class="btn primary" data-act="ask_submit">Submit</button>
+					</div>
 				</div>`;
-			for (const button of cards.querySelectorAll<HTMLButtonElement>('[data-q]')) {
+			// B2-PR-1 tri-state: option clicks toggle per-question selection
+			// (multiSelect accumulates); Submit sends one canonical row per
+			// parked question — untouched questions answer as skip.
+			const selection = new Map<string, string[]>();
+			for (const button of cards.querySelectorAll<HTMLButtonElement>('[data-id]')) {
 				button.onclick = () => {
-					app.answerQuestion([[button.dataset.q ?? '', button.dataset.a ?? '']], null);
+					const id = button.dataset.id ?? '';
+					const label = button.dataset.a ?? '';
+					if (!id) return;
+					const current = selection.get(id) ?? [];
+					const next = current.includes(label)
+						? current.filter((x) => x !== label)
+						: q_multiselect(questions, id)
+							? [...current, label]
+							: [label];
+					selection.set(id, next);
+					for (const sibling of cards.querySelectorAll<HTMLButtonElement>(`[data-id="${CSS.escape(id)}"]`)) {
+						sibling.classList.toggle('selected', next.includes(sibling.dataset.a ?? ''));
+					}
+				};
+			}
+			const submit = cards.querySelector<HTMLButtonElement>('[data-act="ask_submit"]');
+			if (submit) {
+				submit.onclick = () => {
+					const rows = questions
+						.filter((q) => q.id)
+						.map((q) => ({ id: q.id as string, selected: selection.get(q.id as string) ?? [] }));
+					app.answerQuestion(rows);
 				};
 			}
 			return;
@@ -362,6 +392,10 @@ export function createRenderer(app: ChatApp): Renderer {
 	};
 
 	return { render };
+}
+
+function q_multiselect(questions: { id?: string; multiSelect?: boolean }[], id: string): boolean {
+	return questions.find((q) => q.id === id)?.multiSelect === true;
 }
 
 function byId<T extends HTMLElement>(id: string): T {

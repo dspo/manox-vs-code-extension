@@ -146,6 +146,13 @@ lock-step with the Rust `manox-protocol` crate (protocol epoch 6):
 - Not wired yet (protocol supports; UI does not): `ForkSession`, background
   tasks, sub-agent panels, backwards history paging (`PageHistory`),
   plan-mode composer affordances, `GetConversationInfo` usage card.
+- `session/already-owned` (#794): another process holds the session's
+  per-session write lease — e.g. the desktop app is driving the same thread.
+  The holder's exit releases it; a retry then succeeds.
+- `askUserQuestion` speaks the canonical B2-PR-1 vocabulary (#796): the card
+  renders per-question `detail`/`intent`/`multiSelect`, and answers are
+  id-routed tri-state rows (selection, free text, or skip) — no card-level
+  response override.
 - The old extension's `languageModelChatProviders` integration (exposing
   manox providers as VS Code language models via `modelChat`) was cut with
   the revival — it depended on proposed chat-provider APIs; revisit once

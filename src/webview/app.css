@@ -444,3 +444,20 @@ body {
 .btn:hover {
 	filter: brightness(1.1);
 }
+
+.question-detail {
+	font-size: 0.95em;
+	opacity: 0.85;
+	margin: 2px 0 4px;
+}
+
+.question-intent {
+	font-size: 0.85em;
+	opacity: 0.7;
+	font-style: italic;
+	margin-bottom: 4px;
+}
+
+.btn.selected {
+	outline: 2px solid var(--vscode-focusBorder);
+}

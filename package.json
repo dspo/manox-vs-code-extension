@@ -2,7 +2,7 @@
   "name": "manox-vscode",
   "displayName": "manox",
   "description": "manox agent workbench inside VS Code — the headless manox runtime embedded in-process through the manox-napi binding, speaking protocol v2 (journal streams + projections + host events).",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "dspo",
   "license": "MIT",
   "engines": {

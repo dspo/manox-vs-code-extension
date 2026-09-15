@@ -45,8 +45,10 @@ describe('builders produce the exact serde shapes', () => {
 		const outcomeOf = (frame: FromClient) => (frame as { outcome: unknown }).outcome;
 		expect(outcomeOf(approveReply('a', true))).toEqual({ Ok: { allow: true } });
 		expect(outcomeOf(planVerdictReply('p', 'refine'))).toEqual({ Ok: { choice: 'refine' } });
-		expect(outcomeOf(askUserQuestionReply('q', [['hdr', 'opt']], null))).toEqual({
-			Ok: { answers: [['hdr', 'opt']], response: null },
+		// B2-PR-1 canonical (#796): id-routed tri-state rows, no card-level
+		// response override; `custom` is omitted when unset.
+		expect(outcomeOf(askUserQuestionReply('q', [{ id: 'q1', selected: ['opt'] }, { id: 'q2', selected: [] }]))).toEqual({
+			Ok: { answers: [{ id: 'q1', selected: ['opt'] }, { id: 'q2', selected: [] }] },
 		});
 	});
 

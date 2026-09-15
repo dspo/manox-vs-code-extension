@@ -45,7 +45,7 @@ export interface ImageAttachment {
 // ── ClientCall (tag `method`) ───────────────────────────────────────────────
 
 export type ClientCall =
-	| { method: 'initialize'; clientId: string; capabilities: HookKind[]; sessions: string[]; protocolEpoch: number }
+	| { method: 'initialize'; clientId: string; capabilities: AnswerKind[]; sessions: string[]; protocolEpoch: number }
 	| { method: 'openSession'; sessionId: string }
 	| { method: 'listThreads' }
 	| { method: 'listModels' }
@@ -88,8 +88,10 @@ export interface ClientToolSpec {
 	readOnly?: boolean;
 }
 
-/** Capability a client can answer when the server issues a ServerCall. */
-export type HookKind =
+/** Capability a client can answer when the server issues a ServerCall
+ * (Rust `AnswerKind`, answer_kind.rs — renamed from HookKind at #795; the
+ * wire tags are unchanged camelCase literals). */
+export type AnswerKind =
 	| 'approve'
 	| 'planVerdict'
 	| 'askUserQuestion'
@@ -357,10 +359,29 @@ export type ApprovalMode = 'read-only' | 'workspace-write' | 'danger-full-access
 /** Reasoning-effort wire vocabulary accepted by createSession / setReasoningEffort. */
 export type ReasoningEffort = 'high' | 'max';
 
-/** One question step of an `askUserQuestion` ServerCall input payload. */
+/**
+ * One question step of an `askUserQuestion` ServerCall input payload
+ * (B2-PR-1 / L1 vocabulary, #796): every question carries a stable `id`
+ * (server-minted when the model omits it — answers route by it), an
+ * optional `detail` markdown support text, and an optional `intent`
+ * (`{kind, approve}` names the approving option label; only alongside a
+ * `detail`). Answers are tri-state: option selection(s), free text
+ * (`custom`), or skip (empty selected, no custom).
+ */
 export interface AskQuestionWire {
+	id?: string;
 	question: string;
 	header?: string;
+	detail?: string;
+	intent?: { kind: string; approve?: string };
 	multiSelect?: boolean;
 	options: { label: string; description?: string; recommended?: boolean }[];
+}
+
+/** One canonical answer row (B2-PR-1): routed by `id`; skip = empty
+ * `selected` with no `custom`; NO card-level response override. */
+export interface AskAnswerRow {
+	id: string;
+	selected: string[];
+	custom?: string;
 }
