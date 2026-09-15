@@ -126,12 +126,12 @@
       {
         "command": "manox.codeChain.next",
         "key": "alt+right",
-        "when": "manoxCodeChainActive"
+        "when": "activeWebviewPanelId == manox.codeChain"
       },
       {
         "command": "manox.codeChain.prev",
         "key": "alt+left",
-        "when": "manoxCodeChainActive"
+        "when": "activeWebviewPanelId == manox.codeChain"
       }
     ]
   },

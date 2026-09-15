@@ -103,6 +103,11 @@ npm test           # vitest: host suites + webview-ui suites (journal vectors, s
 code .             # then F5 ("Run manox extension")
 ```
 
+`compile` + `test` for both projects run in CI on every PR and on `main`
+pushes (`.github/workflows/ci.yml`, alongside the no-coauthor gate). The
+live-runtime smoke test stays env-gated (`MANOX_SMOKE=1` + a staged
+`manox_napi.node`) and does not run in CI.
+
 Package:
 
 ```sh
@@ -115,11 +120,13 @@ code --install-extension manox-vscode-*.vsix --force
 | Setting | Default | Meaning |
 |---|---|---|
 | `manox.sdkRoot` | *(unset)* | Directory containing `manox_napi.node`. |
-| `manox.stateRoot` | `~/.manox-vscode` | `MANOX_HOME` for the embedded runtime. Must not be the desktop app's `~/.manox` (exclusive runtime lock; contention terminates the extension host). |
+| `manox.stateRoot` | `~/.manox-vscode` | `MANOX_HOME` for the embedded runtime. Must not be the desktop app's `~/.manox` (exclusive runtime lock; contention terminates the extension host). An externally preset `MANOX_HOME` env var wins over this setting — the `/codechain` command provisions into the env root to match. |
 | `manox.approvalMode` | `workspace-write` | Tool-authorization policy seeded into new sessions (`read-only` / `workspace-write` / `danger-full-access`). |
 
 Commands: `manox: Focus Chat`, `manox: New Session`, `manox: Open Code
-Chain` (plus `alt+left`/`alt+right` tour steps while the panel is active).
+Chain` (tour steps are `alt+left`/`alt+right` scoped to
+`activeWebviewPanelId == manox.codeChain`, so they never steal the
+workbench back/forward nav).
 The sidebar header also
 carries model / reasoning-effort / approval-mode selectors; thread rows
 pin/archive; approval, plan-verdict and question cards render inline.

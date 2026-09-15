@@ -1,0 +1,40 @@
+name: build
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# The gate the whole change rests on: root + webview-ui typecheck, the host
+# and webview bundles, and both vitest suites. The live-runtime smoke test
+# stays env-gated (`MANOX_SMOKE`) and is skipped here — it needs a staged
+# `manox_napi.node` and (for the client-tool round-trip) a model provider.
+jobs:
+  compile-test:
+    name: compile + test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            webview-ui/package-lock.json
+
+      - name: Install (host + webview-ui)
+        run: npm ci && npm ci --prefix webview-ui
+
+      - name: Compile (typecheck + host esbuild + webview bundles)
+        run: npm run compile
+
+      - name: Test (host + webview-ui vitest)
+        run: npm test
