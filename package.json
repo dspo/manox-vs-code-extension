@@ -92,6 +92,19 @@
       {
         "command": "manox.openTurnNavigator",
         "title": "manox: Open Turn Navigator"
+      },
+      {
+        "command": "manox.codeChain.open",
+        "title": "manox: Open Code Chain",
+        "icon": "$(link)"
+      },
+      {
+        "command": "manox.codeChain.next",
+        "title": "manox: Code Chain Next Step"
+      },
+      {
+        "command": "manox.codeChain.prev",
+        "title": "manox: Code Chain Previous Step"
       }
     ],
     "menus": {
@@ -109,6 +122,16 @@
         "key": "ctrl+m",
         "mac": "cmd+m",
         "when": "view == manox.chatView"
+      },
+      {
+        "command": "manox.codeChain.next",
+        "key": "alt+right",
+        "when": "manoxCodeChainActive"
+      },
+      {
+        "command": "manox.codeChain.prev",
+        "key": "alt+left",
+        "when": "manoxCodeChainActive"
       }
     ]
   },

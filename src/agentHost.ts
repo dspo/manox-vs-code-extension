@@ -7,6 +7,7 @@
 
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
+import { invokeCodeChainTool } from './codechain/registration';
 import { AgentConnection, type HostCallInterceptor, type Wire } from './client/connection';
 import type { ApprovalMode } from './protocol/types';
 import { parseFromServer } from './protocol/guards';
@@ -60,9 +61,14 @@ function configuredSdkRoot(): string {
  * - openExternal → `vscode.env.openExternal`, reply `{}`. The agent's Open
  *   tool is approval-gated upstream (host_tools), so the wire call arrives
  *   already authorized by the user.
- * - clientTool → declared but inert: invokeClientTool is only routed to a
- *   client that registered tools (registerSessionTools); this host registers
- *   none yet, and any stray delivery falls through to the fail-closed reply. */
+ * - clientTool → the GenCodeChain host tools (§4): `invokeClientTool` MUST
+ *   be answered here, before any per-session shield claims the delivery —
+ *   a viewed session's no-op handler would otherwise swallow the call into
+ *   the server's 300s wait, and a per-session handler could not keep the
+ *   sidebar's approval-card answering alive. The reply payload is the
+ *   `{content, isError}` contract (§9.3): business outcomes — including
+ *   self-correction feedback — answer Ok with `isError: true` so the model
+ *   can read them; the sinks below build the payload shape. */
 function hostCallInterceptor(log: vscode.LogOutputChannel): HostCallInterceptor {
 	return (call, _id, reply) => {
 		switch (call.method) {
@@ -90,6 +96,23 @@ function hostCallInterceptor(log: vscode.LogOutputChannel): HostCallInterceptor 
 						else reply.err(`manox: no handler for external URL: ${call.url}`);
 					},
 					(e) => reply.err(`manox: openExternal failed: ${errorText(e)}`),
+				);
+				return true;
+			}
+			case 'invokeClientTool': {
+				void invokeCodeChainTool(
+					{ sessionId: call.sessionId, name: call.name, input: call.input },
+					{
+						ok: (content, isError) => reply.ok({ content, isError }),
+						err: (message) => reply.err(message),
+					},
+				).then(
+					(handled) => {
+						if (!handled) {
+							reply.err(`manox: client tool '${call.name}' is not served by this host`);
+						}
+					},
+					(e) => reply.err(`manox: client tool dispatch failed: ${errorText(e)}`),
 				);
 				return true;
 			}
@@ -122,8 +145,14 @@ export class AgentHost {
 
 	readonly transport: NapiTransport;
 	readonly connection: AgentConnection;
+	/** §D.2 identity — `registerSessionTools` frames must name it (and the
+	 * server only routes `invokeClientTool` back to its owner). */
+	readonly clientId: string;
+	readonly log: vscode.LogOutputChannel;
 
-	private constructor(clientId: string, extensionPath: string, private readonly log: vscode.LogOutputChannel) {
+	private constructor(clientId: string, extensionPath: string, log: vscode.LogOutputChannel) {
+		this.clientId = clientId;
+		this.log = log;
 		const sdkRoot = resolveSdkRoot(configuredSdkRoot(), process.env.VSCODE_AGENT_HOST_MANOX_SDK_ROOT, extensionPath);
 		if (!sdkRoot) {
 			throw new Error(

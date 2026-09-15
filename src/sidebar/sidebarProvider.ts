@@ -18,20 +18,33 @@
 
 import * as vscode from 'vscode';
 import { AgentHost, configuredApprovalMode, resolveWorkspaceCwd } from '../agentHost';
+import {
+	codeChainOpenChain,
+	codeChainRegisterSession,
+	ensureCodeChain,
+} from '../codechain/registration';
 import { errorText } from '../util';
 import type { FromClient, FromServer } from '../protocol/types';
 
 /** Webview → host messages: raw protocol frames plus diagnostics. The
- * `viewing` verb is retained as a shield registration for compatibility. */
+ * `viewing` verb is retained as a shield registration for compatibility;
+ * `openCodeChain` reopens a stored chain from its journal card (§7). */
 export type ToHost =
 	| { t: 'frame'; frame: FromClient }
 	| { t: 'viewing'; sessionId: string | null }
+	| { t: 'openCodeChain'; chainId: string }
 	| { t: 'log'; level: 'info' | 'warn' | 'error'; message: string };
 
-/** Host → webview messages: raw protocol frames plus host state pushes. */
+/** Host → webview messages: raw protocol frames plus host state pushes.
+ * The `code_chain` verb is the out-of-band journal-card push (§7: a tool
+ * invocation by THIS host has no webview-visible side effect otherwise);
+ * `compose` backfills the composer with a `/codechain …` question (§10
+ * read-only reopen path). */
 export type ToWebview =
 	| { t: 'frame'; frame: FromServer }
 	| { t: 'verb'; kind: 'new_session' | 'open_turn_navigator' }
+	| { t: 'verb'; kind: 'code_chain'; sessionId: string; chainId: string; title: string; nodeCount: number }
+	| { t: 'verb'; kind: 'compose'; text: string }
 	| { t: 'config'; approvalMode: string }
 	| { t: 'boot'; cwd: string; approvalMode: string }
 	| { t: 'fatal'; message: string };
@@ -92,6 +105,9 @@ class ManoxSidebarProvider implements vscode.WebviewViewProvider {
 
 		try {
 			const host = AgentHost.shared(this.context);
+			// The code-chain service rides the first live host (§9.2 replay
+			// needs a connection to observe); idempotent across views.
+			ensureCodeChain(this.context, host);
 			this.unsubscribeFrames = host.connection.onFrame((frame) =>
 				this.post({ t: 'frame', frame }),
 			);
@@ -110,6 +126,16 @@ class ManoxSidebarProvider implements vscode.WebviewViewProvider {
 		switch (msg.t) {
 			case 'viewing':
 				if (msg.sessionId !== null) this.shield(msg.sessionId);
+				return;
+			case 'openCodeChain':
+				// Journal-card / header-chip click (§7): reopen the stored
+				// chain. Evicted rows (LRU cap) get a quiet pointer — the
+				// chain regenerates from the transcript.
+				if (!codeChainOpenChain(msg.chainId)) {
+					void vscode.window.showWarningMessage(
+						'manox: this code chain is no longer stored — ask the agent to regenerate it (client_GenCodeChain).',
+					);
+				}
 				return;
 			case 'log':
 				console[msg.level](`manox webview: ${msg.message}`);
@@ -131,6 +157,10 @@ class ManoxSidebarProvider implements vscode.WebviewViewProvider {
 		if (frame.kind === 'streamOpen' && frame.streamKind.type === 'followSession') {
 			this.streams.set(frame.streamId, frame.streamKind.sessionId);
 			this.shield(frame.streamKind.sessionId);
+			// Following a session makes it card-capable; the code-chain
+			// tools register per (session, clientId) — the replace-on-
+			// re-register semantics make this hook free (§9.2).
+			codeChainRegisterSession(frame.streamKind.sessionId);
 		} else if (frame.kind === 'streamCancel') {
 			const sessionId = this.streams.get(frame.streamId);
 			if (sessionId === undefined) return;
