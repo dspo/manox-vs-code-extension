@@ -1,8 +1,8 @@
 {
   "name": "manox-vscode",
   "displayName": "manox",
-  "description": "manox agent workbench inside VS Code — the headless manox runtime embedded in-process through the manox-napi binding, speaking protocol v2 (journal streams + projections + host events).",
-  "version": "0.6.0",
+  "description": "manox agent workbench inside VS Code \u2014 the headless manox runtime embedded in-process through the manox-napi binding, speaking protocol v2 (journal streams + projections + host events).",
+  "version": "0.7.0",
   "publisher": "dspo",
   "license": "MIT",
   "engines": {
@@ -26,7 +26,7 @@
         "id": "manox",
         "fullName": "manox",
         "name": "manox",
-        "description": "manox agent — ask anything, it runs on the native manox runtime",
+        "description": "manox agent \u2014 ask anything, it runs on the native manox runtime",
         "isSticky": true
       }
     ],
@@ -41,7 +41,7 @@
         "manox.stateRoot": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Value for `MANOX_HOME` — the manox persistent-state root (threads database, session journals, provider config snapshot) used by the embedded runtime. Must not be the desktop app's `~/.manox` (the runtime lock is exclusive; contention terminates the extension host). Empty uses `~/.manox-vscode`."
+          "markdownDescription": "Value for `MANOX_HOME` \u2014 the manox persistent-state root (threads database, session journals, provider config snapshot) used by the embedded runtime. Must not be the desktop app's `~/.manox` (the runtime lock is exclusive; contention terminates the extension host). Empty uses `~/.manox-vscode`."
         },
         "manox.approvalMode": {
           "type": "string",
@@ -88,6 +88,10 @@
         "command": "manox.newSession",
         "title": "manox: New Session",
         "icon": "$(add)"
+      },
+      {
+        "command": "manox.openTurnNavigator",
+        "title": "manox: Open Turn Navigator"
       }
     ],
     "menus": {
@@ -98,13 +102,21 @@
           "group": "navigation"
         }
       ]
-    }
+    },
+    "keybindings": [
+      {
+        "command": "manox.openTurnNavigator",
+        "key": "ctrl+m",
+        "mac": "cmd+m",
+        "when": "view == manox.chatView"
+      }
+    ]
   },
   "scripts": {
-    "compile": "npm run typecheck && node esbuild.config.mjs",
-    "typecheck": "tsc --noEmit",
+    "compile": "npm run typecheck && node esbuild.config.mjs && npm run build --prefix webview-ui",
+    "typecheck": "tsc --noEmit && npm run typecheck --prefix webview-ui",
     "watch": "node esbuild.config.mjs --watch",
-    "test": "vitest run",
+    "test": "vitest run && npm run test --prefix webview-ui",
     "package": "npm run compile && vsce package --no-dependencies"
   },
   "devDependencies": {

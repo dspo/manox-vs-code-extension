@@ -2,21 +2,27 @@
 // the shared agent host. The webview speaks `FromClient` / `FromServer`
 // directly: the host forwards the webview's frames to the napi connection and
 // relays EVERY guard-parsed `FromServer` frame back unfiltered — the webview
-// bundle owns frame interpretation and answers `request` (ServerCall) frames
-// itself. The only intercepted messages are the few host-only verbs the
-// webview cannot fulfill from inside its sandbox.
+// bundle (webview-ui/, the React frontend) owns frame interpretation and
+// answers adjudication `request` frames itself. Session lifecycle rides the
+// wire too; the only host→webview out-of-band messages are the boot facts,
+// settings pushes, and UI verbs the sandbox cannot fulfill itself.
 //
-// ServerCall ownership: the webview announces the session it is viewing
-// (`viewing` verb); the host registers a no-op handler for it so its own
-// fail-closed default does not race the webview's card. Sessions without an
-// active viewer fall back to the host's deny-on-arrival policy.
+// ServerCall ownership: the webview claims sessions by opening follow
+// streams (`streamOpen`); the host registers a no-op handler per claimed
+// session so its own fail-closed default does not race the webview's cards.
+// Shields accumulate for the panel's lifetime (view switching never drops a
+// running thread's cards) and clear at teardown. Sessions nobody follows
+// fall back to the host's deny-on-arrival policy. Capability calls
+// (clipboardRead / openExternal) are answered by the host interceptor before
+// any shield — see agentHost.ts.
 
 import * as vscode from 'vscode';
 import { AgentHost, configuredApprovalMode, resolveWorkspaceCwd } from '../agentHost';
 import { errorText } from '../util';
 import type { FromClient, FromServer } from '../protocol/types';
 
-/** Webview → host messages: raw protocol frames plus host-only verbs. */
+/** Webview → host messages: raw protocol frames plus diagnostics. The
+ * `viewing` verb is retained as a shield registration for compatibility. */
 export type ToHost =
 	| { t: 'frame'; frame: FromClient }
 	| { t: 'viewing'; sessionId: string | null }
@@ -25,7 +31,7 @@ export type ToHost =
 /** Host → webview messages: raw protocol frames plus host state pushes. */
 export type ToWebview =
 	| { t: 'frame'; frame: FromServer }
-	| { t: 'verb'; kind: 'new_session' }
+	| { t: 'verb'; kind: 'new_session' | 'open_turn_navigator' }
 	| { t: 'config'; approvalMode: string }
 	| { t: 'boot'; cwd: string; approvalMode: string }
 	| { t: 'fatal'; message: string };
@@ -49,14 +55,22 @@ export function registerManoxSidebar(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('manox.newSession', () =>
 			postToSidebar({ t: 'verb', kind: 'new_session' }),
 		),
+		// macOS cmd+m is a minimize accelerator; the extension keybinding
+		// contribution routes it here instead, since the webview DOM would
+		// never receive the key.
+		vscode.commands.registerCommand('manox.openTurnNavigator', () =>
+			postToSidebar({ t: 'verb', kind: 'open_turn_navigator' }),
+		),
 	);
 }
 
 class ManoxSidebarProvider implements vscode.WebviewViewProvider {
 	private view: vscode.WebviewView | null = null;
 	private unsubscribeFrames: (() => void) | null = null;
-	/** The session whose ServerCalls the webview currently answers. */
-	private viewedSession: string | null = null;
+	/** Live follow streams the webview opened: streamId → sessionId. */
+	private readonly streams = new Map<string, string>();
+	/** Sessions holding a no-op ServerCall shield (webview answers them). */
+	private readonly shielded = new Set<string>();
 
 	constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -95,12 +109,13 @@ class ManoxSidebarProvider implements vscode.WebviewViewProvider {
 	private async onWebviewMessage(msg: ToHost): Promise<void> {
 		switch (msg.t) {
 			case 'viewing':
-				this.setViewing(msg.sessionId);
+				if (msg.sessionId !== null) this.shield(msg.sessionId);
 				return;
 			case 'log':
 				console[msg.level](`manox webview: ${msg.message}`);
 				return;
 			case 'frame': {
+				this.trackStream(msg.frame);
 				const host = AgentHost.shared(this.context);
 				host.connection.sendRaw(msg.frame);
 				return;
@@ -108,9 +123,30 @@ class ManoxSidebarProvider implements vscode.WebviewViewProvider {
 		}
 	}
 
-	/** Register/clear the no-op ServerCall handler that shields the viewed
-	 * session from the host's fail-closed default. */
-	private setViewing(sessionId: string | null): void {
+	/** Derive ServerCall shields from the webview's follow-stream lifecycle:
+	 * a `streamOpen(followSession)` claims the session (the webview renders
+	 * its cards); a `streamCancel` releases the claim once no other stream
+	 * covers the session. */
+	private trackStream(frame: FromClient): void {
+		if (frame.kind === 'streamOpen' && frame.streamKind.type === 'followSession') {
+			this.streams.set(frame.streamId, frame.streamKind.sessionId);
+			this.shield(frame.streamKind.sessionId);
+		} else if (frame.kind === 'streamCancel') {
+			const sessionId = this.streams.get(frame.streamId);
+			if (sessionId === undefined) return;
+			this.streams.delete(frame.streamId);
+			for (const other of this.streams.values()) {
+				if (other === sessionId) return; // still covered
+			}
+			this.unshield(sessionId);
+		}
+	}
+
+	/** Register the no-op ServerCall handler that shields a session from the
+	 * host's fail-closed default (the webview answers through the relay; the
+	 * handler only claims ownership — see module header). */
+	private shield(sessionId: string): void {
+		if (this.shielded.has(sessionId)) return;
 		const host = (() => {
 			try {
 				return AgentHost.shared(this.context);
@@ -119,13 +155,17 @@ class ManoxSidebarProvider implements vscode.WebviewViewProvider {
 			}
 		})();
 		if (!host) return;
-		if (this.viewedSession && this.viewedSession !== sessionId) {
-			host.connection.setCallHandler(this.viewedSession, null);
+		this.shielded.add(sessionId);
+		host.connection.setCallHandler(sessionId, () => {});
+	}
+
+	private unshield(sessionId: string): void {
+		if (!this.shielded.delete(sessionId)) return;
+		try {
+			AgentHost.shared(this.context).connection.setCallHandler(sessionId, null);
+		} catch {
+			// Host gone (deactivate race): the handler map died with it.
 		}
-		this.viewedSession = sessionId;
-		// The webview answers through the relay; the handler only claims
-		// ownership (see module header).
-		if (sessionId !== null) host.connection.setCallHandler(sessionId, () => {});
 	}
 
 	post(message: ToWebview): void {
@@ -135,7 +175,8 @@ class ManoxSidebarProvider implements vscode.WebviewViewProvider {
 	private teardown(): void {
 		this.unsubscribeFrames?.();
 		this.unsubscribeFrames = null;
-		if (this.viewedSession) this.setViewing(null);
+		this.streams.clear();
+		for (const sessionId of [...this.shielded]) this.unshield(sessionId);
 		if (activeProvider === this) activeProvider = null;
 		this.view = null;
 	}
@@ -153,15 +194,15 @@ class ManoxSidebarProvider implements vscode.WebviewViewProvider {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="vscode-language" content="${vscode.env.language}">
   <meta http-equiv="Content-Security-Policy"
-    content="default-src 'none'; style-src ${webview.cspSource}; script-src ${webview.cspSource}; img-src ${webview.cspSource} data:;">
+    content="default-src 'none'; script-src ${webview.cspSource} 'nonce-${nonce}'; img-src ${webview.cspSource} data: blob:; style-src ${webview.cspSource} 'nonce-${nonce}' 'unsafe-inline'; font-src ${webview.cspSource};">
   <link rel="stylesheet" href="${styleUri}">
 </head>
 <body>
   <div id="root"></div>
-  <script src="${scriptUri}"></script>
+  <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
 	}
 }
-

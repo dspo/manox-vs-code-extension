@@ -1,6 +1,7 @@
-// Bundler for both compile targets:
+// Host bundler:
 //   host    src/extension.ts  → out/extension.js   (CommonJS, node, vscode external)
-//   webview src/webview/main.ts → dist/webview/bundle.{js,css} (browser IIFE)
+// The webview bundle (dist/webview/bundle.{js,css}) is built by the
+// webview-ui/ package (React + Tailwind); `npm run compile` chains both.
 // Test files are never entry points; tsc --noEmit covers typing.
 
 import { build, context } from 'esbuild';
@@ -22,15 +23,6 @@ const targets = [
 		format: 'cjs',
 		external: ['vscode'],
 		target: 'node18',
-	},
-	{
-		...shared,
-		entryPoints: ['src/webview/main.ts'],
-		outdir: 'dist/webview',
-		entryNames: 'bundle',
-		platform: 'browser',
-		format: 'iife',
-		target: 'es2022',
 	},
 ];
 

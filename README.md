@@ -7,9 +7,11 @@ speaking **protocol v2** (journal streams + projections + host events).
 
 This is the standalone home of the VS Code frontend. It originally lived at
 `apps/vscode` in the manox monorepo and was removed there when the v2
-event-journal architecture landed (archived at tag `archive/frontends-final`);
-this repo revives it leaner — v2-native, self-contained, zero runtime npm
-dependencies.
+event-journal architecture landed (archived at tag `archive/frontends-final`).
+The sidebar UI is the original React webview, restored from the manox
+repository history (orphan lineage `apps/web/webui` @ `9c165b25`, the last
+state before the frontend split into `dspo/manox-app`) and adapted to the
+standalone extension's protocol layer — vendored under `webview-ui/`.
 
 ## Architecture
 
@@ -27,13 +29,13 @@ dependencies.
         │ (dspo/manox)   │  capabilities: approve · askUserQuestion · planVerdict
         └────────────────┘
 
-┌─ Webview (dist/webview/bundle.js, browser IIFE) ────────────────────┐
-│ webview/store.ts        ChatApp: its OWN AgentConnection over the   │
-│                         host relay (id namespace `web-`)            │
-│ webview/render.ts       thread list · transcript · approval cards   │
-│ client/journalStream.ts §F.1 engine (ported twin, shared vectors)   │
-│ client/sessionStore.ts  window + projections + running mirror       │
-│ client/transcript.ts    journal records → bubbles / tool cards      │
+┌─ Webview (webview-ui/, React 19 + Tailwind; → dist/webview/bundle.*)┐
+│ state/store.ts          per-thread fold over the journal stream     │
+│ state/journal.ts        §F.1 engine twin (shared manox vectors)     │
+│ api/client.ts           receipts, follow streams, adjudication      │
+│                         replies (frame-MsgId keyed, #796 canonical) │
+│ api/vscode-bridge.ts    {t:*} envelope ↔ FromClient/FromServer      │
+│ components/…            threads view · transcript · cards · pickers │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -44,10 +46,13 @@ Key invariants (from the manox architecture doc, `docs/dsh-v2-architecture.md`):
   connection (`observe` policy) share the napi wire with disjoint id
   namespaces (`host-*` / `web-*`); each ignores the other's correlation ids.
 - **The webview speaks the protocol directly.** The sidebar relay forwards
-  every guard-parsed `FromServer` frame verbatim and relays `FromClient`
-  frames back — the webview answers `request` (adjudication) frames itself.
-  The host registers a no-op ServerCall handler for the session the webview
-  is *viewing* so its own fail-closed default cannot race the card.
+  every guard-parsed `FromServer` frame verbatim (wrapped in `{t:'frame'}`
+  envelopes) and relays `FromClient` frames back — the webview answers
+  adjudication `request` frames itself. The host registers a no-op ServerCall
+  shield for every session the webview claims by opening a follow stream, so
+  its own fail-closed default cannot race a card; unclaimed sessions deny on
+  arrival. Host-owned capabilities (clipboardRead / openExternal) are
+  answered by the host interceptor before any shield.
 - **Client state is journal-folded** (L6): transcript items come from journal
   records via `TranscriptFold`, UI values from projections
   (higher-`asOfSeq`-wins), never from a second domain mirror.
@@ -59,9 +64,15 @@ Key invariants (from the manox architecture doc, `docs/dsh-v2-architecture.md`):
   before loading the addon and starts the agent lazily (first use), never at
   activation.
 
-## Prerequisites: the native binding
+## The native binding
 
-The `.node` addon is **not bundled**. Build it from the manox repository:
+Released vsix packages are **self-contained**: the `manox_napi.node` addon
+is bundled under `native/` and loaded from there — no manox checkout
+required at runtime. The addon is platform-specific (the bundled build is
+macOS arm64); shipping other platforms means packaging per-target vsix
+builds the same way other native extensions do.
+
+For development, rebuild the addon from the manox repository and restage:
 
 ```sh
 git clone https://github.com/dspo/manox   # or your local checkout
@@ -69,14 +80,15 @@ cd manox
 script/build-napi            # lean addon (no MCP/LSP/terminal/WS-gateway), release
 # script/build-napi --full  for the complete runtime
 # script/build-napi --debug for a debug build
+cp target/napi/manox_napi.node <this-repo>/native/   # repackage to bundle it
 ```
 
-Then point this extension at the staged directory — resolution order:
+Resolution order (first hit wins) — the setting/env exist as dev overrides
+so a fresh rebuild can be tested without repackaging:
 
 1. the `manox.sdkRoot` setting,
 2. the `VSCODE_AGENT_HOST_MANOX_SDK_ROOT` environment variable,
-3. `<extension>/native/manox_napi.node` (copy it there to make the install
-   self-contained).
+3. `<extension>/native/manox_napi.node` (the bundled addon).
 
 Providers/models resolve from `<MANOX_HOME>/cx.providers.config.yaml`; the
 first start of a fresh state root copies nothing — drop a provider config
@@ -85,9 +97,9 @@ there (or symlink the desktop app's) to get models.
 ## Develop
 
 ```sh
-npm install
-npm run compile    # tsc --noEmit + esbuild (out/extension.js, dist/webview/bundle.*)
-npm test           # vitest: protocol guards, journal engine vectors, fold, connection
+npm install && npm install --prefix webview-ui
+npm run compile    # tsc (host + webview-ui) + esbuild host + React/Tailwind bundle
+npm test           # vitest: host suites + webview-ui suites (journal vectors, store, guards)
 code .             # then F5 ("Run manox extension")
 ```
 
@@ -153,6 +165,13 @@ lock-step with the Rust `manox-protocol` crate (protocol epoch 6):
   renders per-question `detail`/`intent`/`multiSelect`, and answers are
   id-routed tri-state rows (selection, free text, or skip) — no card-level
   response override.
+- Host capabilities (#792): the staged addon declares `clipboardRead`,
+  `openExternal`, and `clientTool`; the extension host answers clipboard
+  reads (text-only, via `vscode.env.clipboard`) and external opens (via
+  `vscode.env.openExternal`; the agent's Open tool is approval-gated
+  upstream) before any per-session routing, so they never surface as
+  webview cards. `clientTool` is declared but inert until the host
+  registers tools (`registerSessionTools`).
 - The old extension's `languageModelChatProviders` integration (exposing
   manox providers as VS Code language models via `modelChat`) was cut with
   the revival — it depended on proposed chat-provider APIs; revisit once
