@@ -54,9 +54,24 @@ const options = {
   logLevel: 'info',
 };
 
+/**
+ * Second entry: the code-chain panel (`dist/webview/codechain-bundle.js`),
+ * a separate `createWebviewPanel` document. It reuses the same Tailwind
+ * stylesheet (built once from `tokens.css`, which now `@source`s the panel
+ * tree) but NOT the `manox-plugins` virtual module: the panel renders no
+ * extension slots, so its graph never imports `manox:plugins`.
+ */
+const codechainOptions = {
+  ...options,
+  entryPoints: [path.join(root, 'src', 'codechain', 'main.tsx')],
+  plugins: [],
+  outfile: path.join(root, '..', 'dist', 'webview', 'codechain-bundle.js'),
+};
+
 if (watch) {
-  const ctx = await esbuild.context(options);
-  await ctx.watch();
+  await (await esbuild.context(options)).watch();
+  await (await esbuild.context(codechainOptions)).watch();
 } else {
   await esbuild.build(options);
+  await esbuild.build(codechainOptions);
 }

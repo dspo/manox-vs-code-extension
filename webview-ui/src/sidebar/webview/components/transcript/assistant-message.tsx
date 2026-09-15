@@ -1,7 +1,7 @@
 import { memo } from 'react';
 
 import type { TranscriptItem } from '../../state/store';
-import { MarkdownContent } from '../ai/markdown-content';
+import { MarkdownContent } from '../../../../shared/markdown-content';
 import { Message, MessageContent } from '../ai/message';
 import { CopyOnHover } from './copy-on-hover';
 

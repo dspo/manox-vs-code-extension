@@ -14,7 +14,7 @@ import {
 
 import { cn } from '../../lib/utils';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/collapsible';
-import { MarkdownContent } from './markdown-content';
+import { MarkdownContent } from '../../../../shared/markdown-content';
 import { Shimmer } from './shimmer';
 
 interface ReasoningContextValue {

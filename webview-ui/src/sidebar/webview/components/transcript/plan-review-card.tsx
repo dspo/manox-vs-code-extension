@@ -13,7 +13,7 @@ import {
   ConfirmationRequest,
   ConfirmationTitle,
 } from '../ai/confirmation';
-import { MarkdownContent } from '../ai/markdown-content';
+import { MarkdownContent } from '../../../../shared/markdown-content';
 
 export type PlanReviewItem = Extract<TranscriptItem, { kind: 'plan_review' }>;
 

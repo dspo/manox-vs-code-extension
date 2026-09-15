@@ -1,5 +1,10 @@
 @import "tw-animate-css";
 @import "tailwindcss";
+/* The code-chain panel bundle shares these tokens (its own esbuild +
+ * Tailwind entry). Tailwind v4 auto-discovers workspace sources, but the
+ * panel was authored outside the sidebar tree — pin it explicitly so a
+ * future cwd change never drops its utilities from the compiled sheet. */
+@source "../../../codechain";
 @layer base {
   /* Bare border utilities resolve to the theme border token; without this
    * reset, Tailwind v4 preflight leaves border-color at currentColor and

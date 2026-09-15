@@ -16,7 +16,7 @@ import { cn } from '../../lib/utils';
 import { store } from '../../state/bridge';
 import { userTurnHeader } from '../../state/transcript';
 import type { TranscriptItem } from '../../state/store';
-import { MarkdownContent } from '../ai/markdown-content';
+import { MarkdownContent } from '../../../../shared/markdown-content';
 import { CopyOnHover } from './copy-on-hover';
 
 const timeFormat = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });

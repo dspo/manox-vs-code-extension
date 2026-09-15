@@ -15,7 +15,7 @@ import { store } from '../../state/bridge';
 import { t } from '../../lib/i18n';
 import type { TranscriptItem } from '../../state/store';
 import { cn } from '../../lib/utils';
-import { MarkdownContent } from '../ai/markdown-content';
+import { MarkdownContent } from '../../../../shared/markdown-content';
 import {
   Confirmation,
   ConfirmationRequest,
