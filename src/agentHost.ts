@@ -6,8 +6,11 @@
 // manox exits the process on contention).
 
 import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import * as vscode from 'vscode';
+import { ensureCodeChainCommand, resolveProvisionRoot } from './codechain/command';
 import { invokeCodeChainTool } from './codechain/registration';
+import { clientToolReplyPayload } from './protocol/builders';
 import { AgentConnection, type HostCallInterceptor, type Wire } from './client/connection';
 import type { ApprovalMode } from './protocol/types';
 import { parseFromServer } from './protocol/guards';
@@ -103,7 +106,11 @@ function hostCallInterceptor(log: vscode.LogOutputChannel): HostCallInterceptor 
 				void invokeCodeChainTool(
 					{ sessionId: call.sessionId, name: call.name, input: call.input },
 					{
-						ok: (content, isError) => reply.ok({ content, isError }),
+						// Route the payload through the guards-tested
+						// `clientToolReplyPayload` so the `{content,isError}`
+						// shape pinned in guards.test is the SAME object the
+						// live path emits (review #19).
+						ok: (content, isError) => reply.ok(clientToolReplyPayload(content, isError)),
 						err: (message) => reply.err(message),
 					},
 				).then(
@@ -160,6 +167,20 @@ export class AgentHost {
 			);
 		}
 		const stateRoot = configuredStateRoot();
+		// Provision `/codechain` BEFORE the runtime starts: manox's command
+		// registry scans `<MANOX_HOME>/commands` once inside
+		// `napiBinding.start()` (this call), so the file must already exist —
+		// hence synchronous, and honoring the same `MANOX_HOME`-over-setting
+		// precedence the transport itself uses (review #12). A failure here
+		// must not abort activation: a missing command degrades to the
+		// model's documented no-command path.
+		const provisionRoot = resolveProvisionRoot(stateRoot, process.env.MANOX_HOME, (m) => this.log.warn(m));
+		try {
+			const wrote = ensureCodeChainCommand(provisionRoot);
+			this.log.info(`/codechain command ${wrote} (${join(provisionRoot, 'commands')})`);
+		} catch (e) {
+			this.log.warn(`failed to provision /codechain: ${errorText(e)}`);
+		}
 		this.log.info(`loading native binding from ${sdkRoot} (MANOX_HOME=${stateRoot})`);
 		this.transport = NapiTransport.load({
 			sdkRoot,

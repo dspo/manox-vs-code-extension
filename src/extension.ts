@@ -3,28 +3,18 @@
 // (manox-napi) through the v2 protocol. Activation is lazy — nothing starts
 // the agent runtime until a surface first needs it.
 //
-// Code-chain provisioning rides that laziness boundary: the `/codechain`
-// slash command is a markdown file in `<MANOX_HOME>/commands/` that the
-// agent server scans ONCE at startup (manox command.rs), so it must land
-// before the first `AgentHost.shared()` — activation is the only hook
-// guaranteed to precede it.
+// The `/codechain` harness command is NOT provisioned here: the runtime's
+// command scan is one-shot inside `napiBinding.start()`, so the write rides
+// the synchronous boot path in the `AgentHost` constructor (see
+// codechain/command.ts + review #12) — activating can never race it.
 
 import * as vscode from 'vscode';
-import { AgentHost, configuredApprovalMode, configuredStateRoot } from './agentHost';
-import { provisionCodeChainCommand } from './codechain/command';
+import { AgentHost, configuredApprovalMode } from './agentHost';
 import { codeChainListChains, codeChainOpenChain, codeChainStepTour } from './codechain/registration';
 import { registerManoxParticipant } from './participant';
 import { postToSidebar, registerManoxSidebar } from './sidebar/sidebarProvider';
-import { errorText } from './util';
 
 export function activate(context: vscode.ExtensionContext): void {
-	// Before any surface can boot the agent: write (or refresh) the
-	// harness command file. Failures never block activation — a missing
-	// /codechain degrades to the model's documented no-command path.
-	void provisionCodeChainCommand(configuredStateRoot()).catch((e) => {
-		console.warn('manox: /codechain command provisioning failed:', errorText(e));
-	});
-
 	registerManoxSidebar(context);
 	registerManoxParticipant(context);
 	registerCodeChainCommands(context);
@@ -41,8 +31,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
 /** Palette + keybinding surface for the code-chain panel. Opening goes
  * through a quick-pick over the stored chains (§7: chains outlive their
- * session, so this works after reloads); the tour steps are window-global
- * `alt+left/right` so the editor can walk a tour from any focus (§6.3). */
+ * session, so this works after reloads); the tour-step commands are bound
+ * `alt+left/right` ONLY while the code-chain webview panel holds focus
+ * (`activeWebviewPanelId == manox.codeChain`), so they never collide with
+ * the workbench navigate-back/forward (review #13). */
 function registerCodeChainCommands(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('manox.codeChain.open', async () => {

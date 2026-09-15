@@ -95,13 +95,24 @@ export const registerSessionTools = (
 	tools: ClientToolSpec[],
 ): ClientCall => ({ method: 'registerSessionTools', sessionId, clientId, tools });
 
+/** The InvokeClientTool Ok payload shape (§9.3, review #19): the server
+ * reads exactly `{content, isError}` — `content` becomes the toolResult
+ * journal output, `isError: true` turns it into "execution failed:
+ * <content>" the model can self-correct against. Single source so the
+ * production interceptor (agentHost.ts) emits the SAME object the guards
+ * test pins. */
+export const clientToolReplyPayload = (content: string, isError: boolean): { content: string; isError: boolean } => ({
+	content,
+	isError,
+});
+
 /** The InvokeClientTool reply contract: the server reads exactly
  * `{content, isError}` out of the Ok payload — `content` becomes the
  * toolResult journal output, `isError: true` turns it into
  * "execution failed: <content>" the model can self-correct against.
  * Structured results ride as JSON in `content`. */
 export const clientToolReply = (id: string, content: string, isError: boolean): FromClient =>
-	replyOk(id, { content, isError });
+	replyOk(id, clientToolReplyPayload(content, isError));
 
 /** Frequently-shaped Initialize (host-side diagnostics only — the napi binding
  * sends the real handshake itself). */

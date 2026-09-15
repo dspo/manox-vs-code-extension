@@ -4,16 +4,23 @@
 // `description` / `argument-hint`, body renders `$ARGUMENTS`), and submit
 // expansion works identically for the sidebar composer and the chat
 // participant. The extension therefore only has to PROVISION the markdown
-// file into its own state root before the agent runtime first starts — no
-// client-side interception on either surface (verified against the manox
-// tree at Phase 0 follow-up, 2026-09-15).
+// file into the runtime's state root before the agent server first starts —
+// no client-side interception on either surface (verified against the manox
+// tree, 2026-09-15).
+//
+// The provisioning MUST run before `command::init()`, which fires inside
+// `napiBinding.start()` — i.e. during `AgentHost` construction, exactly once
+// per process. So the write lives on that boot path (`ensureCodeChainCommand`
+// is called synchronously in the `AgentHost` constructor), and it is SYNC on
+// purpose: a fire-and-forget promise here would race the runtime's
+// one-shot startup scan (review #12).
 //
 // This module is the single source of the prompt text: the file written to
 // disk and anything that later echoes it both come from `CODECHAIN_COMMAND_MD`.
 // Tool names in the body carry the server's model-facing `client_` prefix
 // (§8 Phase 0 revision) — the model never sees the bare registration name.
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 export const CODECHAIN_COMMAND_NAME = 'codechain';
@@ -34,21 +41,37 @@ argument-hint: <what to understand, e.g. 订单创建接口的业务逻辑>
 若 client_GenCodeChain 报告符号解析失败，根据报错修正 file/symbol 后重试（最多 3 次），仍失败则将失败节点降级为 kind='note' 并在 summary 说明。
 `;
 
+/** Resolve the state root to provision, mirroring the transport's own
+ * precedence: `MANOX_HOME` env wins over the configured setting (the addon
+ * only pins `MANOX_HOME` when it is unset — `napiTransport.loadBinding`).
+ * Without this, an externally preset `MANOX_HOME` would make provisioning
+ * write one directory while the server scans another, so `/codechain`
+ * silently disappears (review #12). Returns the resolved root. */
+export function resolveProvisionRoot(
+	configuredStateRoot: string,
+	envManoxHome: string | undefined,
+	warn: (message: string) => void,
+): string {
+	const env = envManoxHome?.trim();
+	if (env && env !== configuredStateRoot) {
+		warn(
+			`MANOX_HOME is externally set to ${env} but the manox.stateRoot setting says ${configuredStateRoot}; provisioning the command into the env root (what the server scans) — align the two to silence this`,
+		);
+		return env;
+	}
+	return configuredStateRoot;
+}
+
 /** Write (or refresh) `<stateRoot>/commands/codechain.md`. Idempotent: an
  * identical file is left untouched so every activation never churns mtime.
- * Throws surface to the caller — activation must not die over a state-root
- * hiccup, the provisioning call site logs and carries on. */
-export async function provisionCodeChainCommand(stateRoot: string): Promise<'written' | 'unchanged'> {
+ * Synchronous — it runs on the one-time runtime boot path ahead of the
+ * server's startup command scan. Throws surface to the caller; the boot
+ * caller must not let a state-root hiccup abort activation. */
+export function ensureCodeChainCommand(stateRoot: string): 'written' | 'unchanged' {
 	const dir = join(stateRoot, 'commands');
 	const file = join(dir, CODECHAIN_COMMAND_FILE);
-	await mkdir(dir, { recursive: true });
-	let current: string | null = null;
-	try {
-		current = await readFile(file, 'utf8');
-	} catch {
-		current = null;
-	}
-	if (current === CODECHAIN_COMMAND_MD) return 'unchanged';
-	await writeFile(file, CODECHAIN_COMMAND_MD, 'utf8');
+	mkdirSync(dir, { recursive: true });
+	if (existsSync(file) && readFileSync(file, 'utf8') === CODECHAIN_COMMAND_MD) return 'unchanged';
+	writeFileSync(file, CODECHAIN_COMMAND_MD, 'utf8');
 	return 'written';
 }
