@@ -31,7 +31,12 @@ jobs:
             webview-ui/package-lock.json
 
       - name: Install (host + webview-ui)
-        run: npm ci && npm ci --prefix webview-ui
+        # `npm install`, not `npm ci`: the committed lockfiles are generated
+        # on macOS arm64 and npm's `ci` refuses a Linux runner whose
+        # platform-specific optional binaries (esbuild) are absent from the
+        # lockfile. `install` resolves the runner's own optionals; the
+        # compile/test gate (not byte-for-byte reproducibility) is the point.
+        run: npm install --no-audit --no-fund && npm install --no-audit --no-fund --prefix webview-ui
 
       - name: Compile (typecheck + host esbuild + webview bundles)
         run: npm run compile
