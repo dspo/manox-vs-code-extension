@@ -1,37 +1,60 @@
 // CodeChainPanel — the editor-area webview (`createWebviewPanel`, the repo's
 // first; HTML/nonce/CSP mirror `sidebarProvider.renderHtml`). One panel at a
-// time shows one chain; opening another chain swaps the content, closing
+// time shows one chain: opening another chain swaps the content, closing
 // never destroys the chain (§6.3: persistence rides `chainStore`, reopen
 // from the journal card).
 //
+// Lifecycle invariants (review #1):
+//   * the panel is created exactly once; a hidden tab is `reveal()`ed, never
+//     re-created, and the dispose handler is identity-guarded so a stale
+//     panel can never null out a live one;
+//   * `retainContextWhenHidden:false` means VS Code may discard the webview
+//     when the tab hides and reload it empty when shown again — the bundle
+//     posts `{t:'ready'}` on mount and the host answers with a fresh
+//     snapshot (chain + tourState + sync), so a re-shown tab is never stuck
+//     in the empty state;
+//   * the reverse-sync watcher attaches ONCE (constructor), not per-create,
+//     and is disposed with the service.
+//
 // The panel is a dumb view over the store: every FromPanel interaction is
-// answered either locally (tour cursor, candidate pick) or by re-invoking
-// the tool path (`refresh` rides `RefreshCodeChain` through
-// `CodeChainTools.handle`, so the tool reply contract — diff report, stale
-// marking — has exactly one implementation shared with the LLM).
+// answered either locally (candidate pick) or by re-invoking the tool path
+// (`refresh` rides `RefreshCodeChain` through `CodeChainTools.handle`, so
+// the reply contract has exactly one implementation shared with the LLM).
 
 import * as vscode from 'vscode';
 import type { ChainStore } from './chainStore';
 import { replaceNode, withStats } from './chainStore';
 import type { ChainNavigation } from './navigation';
+import { renderPanelHtml } from './panelHtml';
 import { stepTour, tourOrder } from './tour';
-import type { FromPanel, CodeChain, ToPanel } from './types';
+import type { FromPanel, CodeChain, ResolvedNode, ToPanel } from './types';
 import { findNode, type CodeChainTools } from './tools';
 
 const PANEL_VIEW_TYPE = 'manox.codeChain';
 
 export interface PanelSinks {
 	/** `{t:'verb', kind:'compose'}` backfill into the sidebar composer. */
-	compose(text: string): void;
+	compose(text: string, sessionId: string): void;
 	log(message: string): void;
+}
+
+/** The tree state to preserve across a same-chain re-push (§6.3 / review #6):
+ * the host re-sends the whole tree after candidate-pick, Expand and
+ * Annotate; a fresh generation (new chainId) is the only thing that resets
+ * selection / collapse / cursor. */
+function reindexTour(tour: ResolvedNode[], previousId: string | null): number {
+	if (previousId === null) return -1;
+	return tour.findIndex((node) => node.id === previousId);
 }
 
 export class CodeChainPanel {
 	private panel: vscode.WebviewPanel | null = null;
 	private chain: CodeChain | null = null;
 	/** Tour cursor over the current chain's navigable nodes. */
-	private tour: CodeChain['root'][] = [];
+	private tour: ResolvedNode[] = [];
 	private tourIndex = -1;
+	private tourNodeId: string | null = null;
+	private lastSync: string | null = null;
 	private readonly disposables: vscode.Disposable[] = [];
 
 	constructor(
@@ -40,25 +63,30 @@ export class CodeChainPanel {
 		private readonly navigation: ChainNavigation,
 		private readonly tools: () => CodeChainTools,
 		private readonly sinks: PanelSinks,
-	) {}
+	) {
+		// Reverse sync attaches once for the service lifetime; the callback
+		// reads `this.chain` so it is inert until a panel holds a chain.
+		navigation.watchActiveEditor(
+			() => (this.panel ? this.chain : null),
+			(nodeId) => this.post({ t: 'sync', nodeId }),
+		);
+	}
 
 	dispose(): void {
 		for (const d of this.disposables) d.dispose();
 		this.panel?.dispose();
 	}
 
-	/** Reveal with `chain` (create the panel on first use). */
+	/** Reveal with `chain` (create the panel on the very first use). */
 	show(chain: CodeChain): void {
-		if (!this.panel || this.panel.visible === false) {
-			this.create();
-		}
-		this.setChain(chain);
+		if (!this.panel) this.create();
+		this.setChain(chain, /* isNewGeneration */ this.chain?.chainId !== chain.chainId);
 		this.panel?.reveal(undefined, true);
 	}
 
 	/** Push a newer version of the open chain (tool merges) without reveal. */
 	update(chain: CodeChain): void {
-		if (this.panel && this.chain?.chainId === chain.chainId) this.setChain(chain);
+		if (this.panel) this.setChain(chain, /* isNewGeneration */ this.chain?.chainId !== chain.chainId);
 	}
 
 	/** Reopen a stored chain (journal card / plugin chip / command). */
@@ -69,7 +97,7 @@ export class CodeChainPanel {
 		return true;
 	}
 
-	/** Re-resolve the open chain through the tool path (§6.3 ⟳ button). */
+	/** The refresh button rides the tool reply; report the human summary. */
 	private refresh(): void {
 		if (!this.chain) return;
 		const chainId = this.chain.chainId;
@@ -94,41 +122,82 @@ export class CodeChainPanel {
 			},
 		);
 		this.panel = webviewPanel;
-		webviewPanel.webview.html = this.renderHtml(webviewPanel.webview);
-		webviewPanel.webview.onDidReceiveMessage((msg: FromPanel) => this.onMessage(msg), undefined, this.disposables);
-		// Keybinding scope: alt+left/right belong to the tour only while a
-		// code-chain panel is the active editor (never hijack the workbench
-		// back/forward nav elsewhere).
-		this.setContextKey(false);
-		webviewPanel.onDidChangeViewState(() => this.setContextKey(webviewPanel.active));
+		webviewPanel.webview.html = renderPanelHtml(this.panelHtmlInput(webviewPanel.webview));
+		webviewPanel.webview.onDidReceiveMessage((msg: FromPanel) => this.onMessage(msg, webviewPanel), undefined, this.disposables);
+		// Keybinding scope is `activeWebviewPanelId == manox.codeChain`
+		// (package.json) — the precise built-in predicate, so alt+left/right
+		// only fire while this panel holds focus and never steal the
+		// workbench back/forward nav (review #13). No context key to manage.
 		webviewPanel.onDidDispose(() => {
-			this.setContextKey(false);
-			this.panel = null;
-			this.chain = null;
-			this.tour = [];
-			this.tourIndex = -1;
+			// Identity guard: a late dispose from a replaced panel must not
+			// clear the current one (review #1).
+			if (this.panel === webviewPanel) {
+				this.panel = null;
+				this.chain = null;
+				this.tour = [];
+				this.tourIndex = -1;
+				this.tourNodeId = null;
+			}
 		});
-		// Reverse sync (§6.3): the panel is the consumer; navigation decides
-		// when a hit is meaningful (open chain only).
-		this.navigation.watchActiveEditor(
-			() => this.chain,
-			(nodeId) => this.post({ t: 'sync', nodeId }),
-		);
 	}
 
-	private setChain(chain: CodeChain): void {
+	private panelHtmlInput(webview: vscode.Webview) {
+		const nonce = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+		return {
+			nonce,
+			cspSource: webview.cspSource,
+			language: vscode.env.language,
+			scriptUri: webview.asWebviewUri(
+				vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'codechain-bundle.js'),
+			).toString(),
+			// The shared Tailwind sheet covers both surfaces: `tokens.css`
+			// @sources the codechain tree, so one `bundle.css` carries the
+			// panel's utilities too — no second stylesheet.
+			styleUri: webview.asWebviewUri(
+				vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'bundle.css'),
+			).toString(),
+		};
+	}
+
+	private setChain(chain: CodeChain, isNewGeneration: boolean): void {
+		// Preserve the tour cursor by node id across a same-chain re-push;
+		// only a genuinely new chain generation resets view state (§6.3,
+		// review #6 — candidate-pick / Expand / Annotate re-send the whole
+		// tree and must NOT kick the user back to the root).
+		const keepCursor = isNewGeneration ? null : this.tourNodeId;
 		this.chain = chain;
 		this.tour = tourOrder(chain);
-		this.tourIndex = -1;
+		if (isNewGeneration) {
+			this.tourIndex = -1;
+			this.tourNodeId = null;
+		} else {
+			const reindexed = reindexTour(this.tour, keepCursor);
+			this.tourIndex = reindexed;
+			this.tourNodeId = reindexed >= 0 ? keepCursor : null;
+		}
 		if (this.panel) {
 			this.panel.title = `⛓ ${chain.title}`;
 			this.post({ t: 'chain', chain });
-			this.post({ t: 'tourState', index: -1, total: this.tour.length });
+			this.post({ t: 'tourState', index: this.tourIndex, total: this.tour.length });
 		}
 	}
 
-	private onMessage(msg: FromPanel): void {
+	/** Answer a bundle (re)mount: the webview context may have been
+	 * discarded while hidden, so re-send every slice of current state. */
+	private resend(webviewPanel: vscode.WebviewPanel): void {
+		if (!this.chain || this.panel !== webviewPanel) return;
+		webviewPanel.webview.postMessage({ t: 'chain', chain: this.chain } satisfies ToPanel);
+		webviewPanel.webview.postMessage({ t: 'tourState', index: this.tourIndex, total: this.tour.length } satisfies ToPanel);
+		webviewPanel.webview.postMessage({ t: 'sync', nodeId: this.lastSync } satisfies ToPanel);
+	}
+
+	private onMessage(msg: FromPanel, source: vscode.WebviewPanel): void {
+		// A message from a replaced panel is dropped outright.
+		if (source !== this.panel) return;
 		switch (msg?.t) {
+			case 'ready':
+				this.resend(source);
+				return;
 			case 'nodeClick':
 				void this.clickNode(msg.nodeId, msg.focus);
 				return;
@@ -145,7 +214,7 @@ export class CodeChainPanel {
 				if (this.chain) void this.navigation.findReferences(this.chain, msg.nodeId);
 				return;
 			case 'regen':
-				this.sinks.compose(`/codechain ${msg.question}`);
+				this.sinks.compose(`/codechain ${msg.question}`, this.chain?.sessionId ?? '');
 				return;
 			case 'log':
 				this.sinks.log(`panel[${msg.level}]: ${msg.message}`);
@@ -167,6 +236,7 @@ export class CodeChainPanel {
 		const step = stepTour(this.tour, this.tourIndex, dir);
 		if (!step || !this.chain) return;
 		this.tourIndex = step.index;
+		this.tourNodeId = step.node.id;
 		this.post({ t: 'tourState', index: step.index, total: this.tour.length });
 		void this.navigation.showNode(this.chain, step.node.id, false);
 	}
@@ -183,49 +253,22 @@ export class CodeChainPanel {
 				file: n.location.file,
 				symbolPath: n.location.symbolPath,
 				range: candidate.range,
+				// The picked candidate is a full symbol/text range; the
+				// selection anchor cannot be recovered from it, so it
+				// collapses onto the range (still name-precise enough for a
+				// user-chosen position).
+				selectionRange: candidate.range,
 				resolveStatus: 'ok',
 			},
 		})).root;
 		const next = withStats({ ...this.chain, root });
 		this.store.save(next);
-		this.setChain(next);
-	}
-
-	private setContextKey(active: boolean): void {
-		void vscode.commands.executeCommand('setContext', 'manoxCodeChainActive', active);
+		this.setChain(next, /* isNewGeneration */ false);
 	}
 
 	private post(message: ToPanel): void {
+		if (message.t === 'sync') this.lastSync = message.nodeId;
 		void this.panel?.webview.postMessage(message);
-	}
-
-	/** CSP/nonce per the sidebar's pattern (§2: repo precedent, not invention). */
-	private renderHtml(webview: vscode.Webview): string {
-		const nonce = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-		const scriptUri = webview.asWebviewUri(
-			vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'codechain-bundle.js'),
-		);
-		// The shared Tailwind sheet covers both surfaces: `tokens.css`
-		// @sources the codechain tree (webview-ui/styles), so one `bundle.css`
-		// build carries the panel's utilities too — no second stylesheet.
-		const styleUri = webview.asWebviewUri(
-			vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'bundle.css'),
-		);
-		return /* html */ `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="vscode-language" content="${vscode.env.language}">
-  <meta http-equiv="Content-Security-Policy"
-    content="default-src 'none'; script-src ${webview.cspSource} 'nonce-${nonce}'; img-src ${webview.cspSource} data: blob:; style-src ${webview.cspSource} 'nonce-${nonce}' 'unsafe-inline'; font-src ${webview.cspSource};">
-  <link rel="stylesheet" href="${styleUri}">
-</head>
-<body>
-  <div id="root"></div>
-  <script nonce="${nonce}" src="${scriptUri}"></script>
-</body>
-</html>`;
 	}
 }
 

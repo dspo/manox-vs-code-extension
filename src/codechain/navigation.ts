@@ -61,8 +61,9 @@ export class ChainNavigation {
 		}
 	}
 
-	/** Open `references` on the node's symbol position (hover-menu "查找引
-	 * 用": the built-in references-view command, like the agent's own). */
+	/** Open `references` on the node's symbol position (the hover-menu
+	 * find-references action): the built-in references-view command, like the
+	 * agent's own. */
 	async findReferences(chain: CodeChain, nodeId: string): Promise<void> {
 		const node = findNode(chain.root, nodeId);
 		const range = node ? nodeRange(node) : undefined;
@@ -87,9 +88,12 @@ export class ChainNavigation {
 		editor.setDecorations(this.highlightType, [toVsRange(range)]);
 	}
 
-	/** Start reverse sync. The callback fires with the node the current
-	 * editor has landed on, or null when the editor left every node.
-	 * Throttled because active-editor changes fire on rapid tab flips. */
+	/** Start reverse sync (called exactly once, from the panel constructor —
+	 * the panel no longer re-creates itself, so this can never stack a
+	 * second pair of listeners; the service `dispose()` tears them down).
+	 * The callback fires with the node the current editor has landed on, or
+	 * null when the editor left every node. Throttled because active-editor
+	 * changes fire on rapid tab flips. */
 	watchActiveEditor(getChain: () => CodeChain | null, onNode: (nodeId: string | null) => void): void {
 		let last = '';
 		const emit = (nodeId: string | null): void => {
