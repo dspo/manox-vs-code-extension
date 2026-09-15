@@ -201,19 +201,15 @@ export function createWebBridge(options: WebBridgeOptions = {}): Bridge {
 
 	return {
 		post(message) {
-			// Host-only verbs never reach the browser host; the webview is
-			// expected to translate them into `FromClient` sequences before
-			// posting (see `client.ts`). A stray verb is dropped.
-			if (
-				isRecord(message) &&
-				typeof message.kind === 'string' &&
-				({ new_session: 1, open_thread: 1, plan_execute_fresh: 1 } as Record<string, number>)[
-					message.kind
-				] !== undefined
-			) {
+			// Only `FromClient` frames have a browser-host path. The
+			// `{t:'openCodeChain'}` card click is a VS Code host affordance
+			// (chains live in the extension's workspaceState) — nothing to
+			// open over a raw socket, so it is dropped like the retired
+			// host-only verbs.
+			if ('t' in message) {
 				return;
 			}
-			send(message as FromClient);
+			send(message);
 		},
 		onMessage(listener) {
 			listeners.add(listener);

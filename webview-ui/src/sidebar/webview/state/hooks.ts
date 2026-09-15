@@ -26,7 +26,7 @@ import type {
 	ThreadListItem,
 } from '../../../protocol';
 import { store } from './bridge';
-import type { ChatState, ThreadState } from './store';
+import type { ChatState, ThreadState, TranscriptItem } from './store';
 
 /** The observable folded state surface a selector reads. */
 export type StoreSelector<T> = (state: ChatState) => T;
@@ -213,6 +213,25 @@ export function useThreadRow(sessionId: string | null | undefined): ThreadListIt
 export function useReasoningEffort(sessionId: string | null | undefined): ReasoningEffort | null {
 	return useProjection('reasoning_effort', sessionId, (slot) =>
 		typeof slot?.value === 'string' ? (slot.value as ReasoningEffort) : null,
+	);
+}
+
+/** A session's code-chain cards (§7): the transient cards pushed by the
+ * host note, read straight off the folded `items` (no second domain mirror,
+ * L6). `shallow` keeps the selector result referentially stable — the card
+ * objects carry identity across publishes, only the array is rebuilt. */
+export function useCodeChainCards(
+	sessionId: string | null | undefined,
+): Extract<TranscriptItem, { kind: 'code_chain' }>[] {
+	return useStore(
+		(state) =>
+			sessionId
+				? (state.perThread[sessionId]?.items ?? []).filter(
+						(item): item is Extract<TranscriptItem, { kind: 'code_chain' }> =>
+							item.kind === 'code_chain',
+					)
+				: [],
+		shallow,
 	);
 }
 

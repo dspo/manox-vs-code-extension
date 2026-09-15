@@ -7,7 +7,7 @@ import type { ClipboardEvent, KeyboardEvent } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { ApprovalMode, CommandEntry, ImageAttachment, ModelInfo, ReasoningEffort } from '../../../../protocol';
-import { mintRpcId, ThreadApi } from '../../api/client';
+import { mintRpcId, onComposePrefill, ThreadApi } from '../../api/client';
 import { hasCommandKey, t, type I18nKey } from '../../lib/i18n';
 import { enterAction } from '../../lib/ime';
 import { recallStep } from '../../lib/turn-recall';
@@ -227,6 +227,21 @@ export const Composer = ({
   const compositionEndedAtRef = useRef(0);
   const draft = sessionId === null && onCreateSession !== undefined;
   const ready = sessionId !== null || draft;
+
+  // A host `compose` note (panel Regenerate / "从该节点重新生成", §10):
+  // backfill the question verbatim and refocus so the user edits/sends it
+  // as their own turn. Not auto-submitted — the prefill is a proposal.
+  useEffect(
+    () =>
+      onComposePrefill((text) => {
+        setText(text);
+        requestAnimationFrame(() => textareaRef.current?.focus());
+      }),
+    // textareaRef is a stable ref object; the subscription lives for the
+    // composer's lifetime.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
   // The typeahead is live only while the leading token is an unfinished
   // slash invocation; the actor does the actual routing on submit. Leading

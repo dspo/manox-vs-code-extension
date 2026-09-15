@@ -195,6 +195,19 @@ const DICT = {
     en: (n: number) => `${n} models registered`,
     zh: (n: number) => `已注册 ${n} 个模型`,
   },
+  // ── code-chain (§7 transcript card + session-header plugin chip) ────────
+  cc_card_nodes: {
+    en: (n: number) => `${n}-node code chain`,
+    zh: (n: number) => `${n} 个节点的代码链`,
+  },
+  cc_card_open: { en: 'Open chain', zh: '打开代码链' },
+  cc_chip: { en: 'Code chains', zh: '代码链' },
+  cc_chip_aria: { en: 'Code chains in this session', zh: '本会话的代码链' },
+  cc_chip_empty: { en: 'No code chains yet', zh: '暂无代码链' },
+  cc_chip_run_hint: {
+    en: 'Run /codechain to build a code-reading tour',
+    zh: '运行 /codechain 生成可阅读的代码链',
+  },
 } satisfies Record<string, Entry>;
 
 export type I18nKey = keyof typeof DICT;

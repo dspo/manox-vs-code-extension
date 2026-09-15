@@ -24,12 +24,18 @@ import { setBootFacts } from './host-facts';
 type HostEnvelope =
 	| { t: 'frame'; frame: FromServer }
 	| { t: 'verb'; kind: 'new_session' }
+	| { t: 'verb'; kind: 'open_turn_navigator' }
+	| { t: 'verb'; kind: 'code_chain'; sessionId: string; chainId: string; title: string; nodeCount: number }
+	| { t: 'verb'; kind: 'compose'; text: string }
 	| { t: 'config'; approvalMode: string }
 	| { t: 'boot'; cwd: string; approvalMode: string }
 	| { t: 'fatal'; message: string };
 
-/** Webview → host envelope (mirror of the extension's ToHost). */
+/** Webview → host envelope. Protocol frames ride `{t:'frame'}`; anything
+ * already carrying a `t` tag (the code-chain `openCodeChain` ask) is
+ * passed through verbatim — the host mirrors this union in its ToHost. */
 type WebviewEnvelope =
+	| ({ t: string } & Record<string, unknown>)
 	| { t: 'frame'; frame: FromClient }
 	| { t: 'log'; level: 'info' | 'warn' | 'error'; message: string };
 
@@ -67,11 +73,15 @@ export function createVscodeBridge(): Bridge {
 			case 'config':
 				setBootFacts({ approvalMode: msg.approvalMode });
 				return;
-			case 'verb':
+			case 'verb': {
 				// Surface host commands as UI notes (the api layer routes
-				// them: new_session starts the draft flow).
-				for (const listener of listeners) listener({ kind: msg.kind });
+				// them: new_session starts the draft flow; code_chain parks
+				// a journal card; compose prefills the composer). Payloads
+				// ride the note; only the `t` envelope tag is stripped.
+				const { t: _envelopeTag, ...note } = msg;
+				for (const listener of listeners) listener(note as HostNote);
 				return;
+			}
 			case 'fatal':
 				// Render through the ordinary error-banner path: a global
 				// error note the store folds into `error`.
@@ -87,6 +97,15 @@ export function createVscodeBridge(): Bridge {
 
 	return {
 		post(message: ToHost) {
+			// The code-chain card click (`{t:'openCodeChain'}`) is a
+			// first-class host affordance, not a protocol frame — pass it
+			// through on its own `t` tag; the host relay mirrors the union
+			// in `sidebarProvider.ToHost`. Everything else is a `FromClient`
+			// wrapped in the `{t:'frame'}` envelope.
+			if ('t' in message) {
+				vscode.postMessage(message);
+				return;
+			}
 			vscode.postMessage({ t: 'frame', frame: message });
 		},
 		onMessage(listener) {

@@ -110,6 +110,17 @@ export type TranscriptItem =
       answered?: boolean;
       output?: string;
       isError?: boolean;
+    }
+  | {
+      /** A GenCodeChain result (§7): a transient card (no journal fold —
+       * the toolCall/toolResult pair already renders as an ordinary tool
+       * card), pushed out-of-band by the host and clickable to reopen the
+       * editor-area panel. Chain data stays host-side. */
+      kind: 'code_chain';
+      id: string;
+      chainId: string;
+      title: string;
+      nodeCount: number;
     };
 
 /** Turn header: `{from} > {to}·{model}·{time}` — mirrors the gpui host.

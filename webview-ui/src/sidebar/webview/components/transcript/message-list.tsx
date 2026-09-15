@@ -19,6 +19,7 @@ import { ApprovalCard } from './approval-card';
 import { AskQuestionCard } from './ask-question-card';
 import { AssistantMessage } from './assistant-message';
 import { BackgroundTaskCard } from './background-task-card';
+import { CodeChainCard } from './code-chain-card';
 import { CopyOnHover } from './copy-on-hover';
 import { PlanReviewCard } from './plan-review-card';
 import { ThinkingBlock } from './thinking-block';
@@ -131,6 +132,8 @@ export const MessageList = ({
         );
       case 'ask_question':
         return <AskQuestionCard item={item} key={item.id} sessionId={sessionId} />;
+      case 'code_chain':
+        return <CodeChainCard item={item} key={item.id} />;
     }
   };
 
