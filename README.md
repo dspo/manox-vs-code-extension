@@ -209,16 +209,23 @@ lock-step with the Rust `manox-protocol` crate (protocol epoch 6):
   GenCodeChain tool set (`registerSessionTools`) and answers
   `invokeClientTool` from the interceptor (see below).
 - GenCodeChain (`src/codechain/`): the LLM generates an LSP-verified
-  code-reading tour rendered in an editor-area webview panel. Six
+  code-reading tour rendered in an editor-area webview panel. Seven
   client tools (`GenCodeChain` / `NarrateCodeChain` /
-  `ExtendCodeChainNode` / `ExpandCodeChainNode` /
-  `AnnotateCodeChainNode` / `RefreshCodeChain`, all `read_only`) drive
+  `ExtendCodeChainNode` / `AddCodeChainNode` /
+  `ExpandCodeChainNode` / `AnnotateCodeChainNode` /
+  `RefreshCodeChain`, all `read_only`) drive
   it. The business flow is built progressively so no single tool reply
-  overruns the model's output budget: `GenCodeChain` seeds the spine
-  only, `NarrateCodeChain` commits the chain's business story as its own
+  overruns the model's output budget. The default path is node-by-node:
+  `AddCodeChainNode` appends exactly ONE node per call (a ~300-char tool
+  JSON), which is the only shape a small-output-budget model — e.g.
+  qwen3.8-flash through Bailian, ~2K output tokens shared across
+  thinking/text/tool JSON, whose calls truncated mid-JSON even at a
+  ≤8-node shard, the cut point tracking the budget down (5334 → 3251
+  chars) — can reliably emit; `GenCodeChain` (whole spine) and
+  `ExtendCodeChainNode` (a ≤8-node block) remain large-budget shortcuts.
+  `NarrateCodeChain` commits the chain's business story as its own
   call (a narrative + tree in one payload blew a ~5KB budget and cut the
-  stream mid-JSON on a real model), and `ExtendCodeChainNode` grows the
-  tree one ≤8-node chunk at a time. Symbol positions resolve through the `vscode.execute*Provider`
+  stream mid-JSON on a real model). Symbol positions resolve through the `vscode.execute*Provider`
   commands, so a hallucinated location is rejected back to the model.
   `/codechain` is a harness slash command provisioned into
   `<MANOX_HOME>/commands/codechain.md` at activation. The full invoke

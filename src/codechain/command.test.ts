@@ -30,6 +30,9 @@ describe('provisionCodeChainCommand (review #12)', () => {
 		expect(md).toContain('$ARGUMENTS');
 		expect(md).toContain('client_GenCodeChain');
 		expect(md).toContain('argument-hint');
+		// The DEFAULT build path is node-by-node: the workflow must name the
+		// single-node tool alongside the whole-tree seed it replaces.
+		expect(md).toContain('client_AddCodeChainNode');
 		// The business story is its own step (2b), not folded into the seed.
 		expect(md).toContain('client_NarrateCodeChain');
 		// Progressive-building workflow keywords: the narrative seed, the
