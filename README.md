@@ -209,10 +209,16 @@ lock-step with the Rust `manox-protocol` crate (protocol epoch 6):
   GenCodeChain tool set (`registerSessionTools`) and answers
   `invokeClientTool` from the interceptor (see below).
 - GenCodeChain (`src/codechain/`): the LLM generates an LSP-verified
-  code-reading tour rendered in an editor-area webview panel. Four
-  client tools (`GenCodeChain` / `ExpandCodeChainNode` /
+  code-reading tour rendered in an editor-area webview panel. Six
+  client tools (`GenCodeChain` / `NarrateCodeChain` /
+  `ExtendCodeChainNode` / `ExpandCodeChainNode` /
   `AnnotateCodeChainNode` / `RefreshCodeChain`, all `read_only`) drive
-  it; symbol positions resolve through the `vscode.execute*Provider`
+  it. The business flow is built progressively so no single tool reply
+  overruns the model's output budget: `GenCodeChain` seeds the spine
+  only, `NarrateCodeChain` commits the chain's business story as its own
+  call (a narrative + tree in one payload blew a ~5KB budget and cut the
+  stream mid-JSON on a real model), and `ExtendCodeChainNode` grows the
+  tree one ≤8-node chunk at a time. Symbol positions resolve through the `vscode.execute*Provider`
   commands, so a hallucinated location is rejected back to the model.
   `/codechain` is a harness slash command provisioned into
   `<MANOX_HOME>/commands/codechain.md` at activation. The full invoke

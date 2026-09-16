@@ -482,7 +482,11 @@ export interface DraftValidation {
  * companion text the tools pass alongside the tree: when provided it is
  * clamped to MAX_NARRATIVE_CHARS and echoed back on the result, so the
  * caller persists exactly what this face validated (the same one-stop
- * contract as `summary` — `resolveChain` itself never re-clamps).
+ * contract as `summary` — `resolveChain` itself never re-clamps). As of the
+ * narrate split, the only tree-bearing caller still passing one is
+ * ExtendCodeChainNode's optional replacement path — GenCodeChain seeds the
+ * spine only (client_NarrateCodeChain commits the story on its own call) —
+ * so the parameter is optional by design and a caller may omit it.
  *
  * There is no `errors` channel here by design: a cap violation is a
  * truncation (a `warning`), and a malformed node is a `parseDraft` drop —
