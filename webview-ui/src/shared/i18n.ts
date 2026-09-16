@@ -22,6 +22,10 @@ const DICT = {
   cc_next: { en: 'Next step', zh: '下一步' },
   cc_refresh: { en: 'Refresh positions', zh: '刷新位置' },
   cc_expand_all: { en: 'Expand / collapse all', zh: '全部展开 / 折叠' },
+  // Layout switch (tree ⇄ focus card); the choice persists across re-layouts.
+  cc_toggle_layout: { en: 'Switch layout (tree / focus)', zh: '切换布局（目录 / 导游卡片）' },
+  // The focus card's "table of contents" drawer (the tree, as an overlay).
+  cc_toc: { en: 'Contents', zh: '目录' },
   cc_open_editor: { en: 'Open in editor', zh: '在编辑器中打开' },
   cc_find_refs: { en: 'Find references', zh: '查找引用' },
   cc_copy_path: { en: 'Copy symbol path', zh: '复制符号路径' },
@@ -34,6 +38,12 @@ const DICT = {
   cc_implementations: { en: (n: number) => `${n} implementations`, zh: (n: number) => `${n} 个实现` },
   cc_candidates: { en: 'Candidates — click to pin', zh: '候选位置 — 点击选定' },
   cc_narrative: { en: 'Business narrative', zh: '业务叙事' },
+  // Collapse bar for the chain narrative (§6.2: the story rides one row, not
+  // a block that pushes the tree). The count is interpolated by the caller.
+  cc_narrative_toggle: {
+    en: (n: number) => `📖 Business narrative · ${n} chars`,
+    zh: (n: number) => `📖 业务叙事 · ${n} 字`,
+  },
   cc_empty: { en: 'No Code Tutor chain loaded', zh: '尚未加载代码导游' },
   cc_provenance_call: { en: 'call graph', zh: '调用图谱' },
   cc_provenance_type: { en: 'type graph', zh: '类型图谱' },
