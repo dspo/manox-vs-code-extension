@@ -17,6 +17,7 @@
 // cross-file; a bare textual match is never `ok` — it lands as `ambiguous`
 // with a `weak` marker so the UI shows a picker and a note (review #3).
 
+import { errorText } from '../util';
 import type {
 	ChainCandidate,
 	ChainKind,
@@ -41,12 +42,21 @@ export interface LspSymbol {
 	children: LspSymbol[];
 }
 
-/** Plain-data mirror of `vscode.CallHierarchyItem` / `TypeHierarchyItem`. */
+/** Plain-data mirror of `vscode.CallHierarchyItem` / `TypeHierarchyItem`,
+ * plus the adapter-owned `handle`: the ONE field the core never reads or
+ * rewrites. A real provider item is not structurally forgeable — VS Code's
+ * `provide*` commands `instanceof`-check their argument and route on hidden
+ * `_sessionId`/`_itemId` fields only a `prepare*` result carries (review
+ * round-2, critical). So the adapter stamps `handle` on every item it
+ * returns from `prepare*`, and reads it back verbatim on `outgoing`/
+ * `incoming`/`subtypes`; any rebuilt plain object would fail VS Code's
+ * validation exactly as the old `anchor()` literal did. */
 export interface LspItem {
 	name: string;
 	uri: string;
 	range: ChainRange;
 	selectionRange: ChainRange;
+	handle?: unknown;
 }
 
 export interface LspLocation {
@@ -75,23 +85,25 @@ export async function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout:
 	}
 }
 
-/** The provider surface the engine needs. Failure tolerance is the
- * adapter's contract: an absent provider resolves an empty list, and every
- * call races the adapter-side `PROVIDER_TIMEOUT_MS`. */
+/** The provider surface the engine needs. Failure tolerance differs by call:
+ * resolution probes (`documentSymbols`/`workspaceSymbols`/`readText`) degrade
+ * a wedged or absent provider to an empty result so the fallback chain keeps
+ * working; HIERARCHY calls do NOT — a `prepare*`/`provide*` rejection must
+ * reach the caller so an Expand can report a real failure instead of the
+ * false "no edges" (review round-2, critical). */
 export interface LspClient {
 	documentSymbols(uri: string): Promise<LspSymbol[]>;
 	/** Open (without stealing focus) and read a document; '' when unreadable. */
 	readText(uri: string): Promise<string>;
 	/** §5 zero-hit fallback: the workspace-wide symbol index. */
 	workspaceSymbols(query: string): Promise<LspLocation[]>;
+	/** Each returned item carries a `handle` the adapter needs to call the
+	 * `provide*` commands below — relay it back unchanged. */
 	prepareCallHierarchy(uri: string, position: { line: number; character: number }): Promise<LspItem[]>;
 	incomingCalls(item: LspItem): Promise<LspItem[]>;
 	outgoingCalls(item: LspItem): Promise<LspItem[]>;
 	prepareTypeHierarchy(uri: string, position: { line: number; character: number }): Promise<LspItem[]>;
-	supertypes(item: LspItem): Promise<LspItem[]>;
 	subtypes(item: LspItem): Promise<LspItem[]>;
-	references(uri: string, position: { line: number; character: number }): Promise<LspLocation[]>;
-	implementations(uri: string, position: { line: number; character: number }): Promise<LspLocation[]>;
 }
 
 /** Workspace facts the file-resolution + key-normalization steps need. The
@@ -440,23 +452,27 @@ export function expansionKey(workspace: WorkspaceView, name: string, uri: string
 // ── whole-tree caps (draft validation) ──────────────────────────────────────
 
 export interface DraftValidation {
-	ok: boolean;
-	/** Per-node failure lines for the tool reply (LLM self-correction). */
-	errors: string[];
-	/** Truncated/clamped draft tree (caps enforced here, §3). */
-	draft: ChainNodeDraft;
+	/** Caps applied by truncation/clamping are reported here (§3): they inform
+	 * the model but never gate the self-correction loop — an over-tall or
+	 * over-wide draft is shortened and rendered, not rejected. */
 	warnings: string[];
+	/** The draft with every §3 cap enforced. */
+	draft: ChainNodeDraft;
 }
 
 /** Enforce §3 caps over the submitted tree: depth, node budget, summary
  * length — truncating rather than rejecting, and reporting every cut so the
  * model knows what happened.
  *
+ * There is no `errors` channel here by design: a cap violation is a
+ * truncation (a `warning`), and a malformed node is a `parseDraft` drop —
+ * neither is a resolution failure, so none belongs in the self-correct gate
+ * (review round-2, suggestion 4).
+ *
  * Depth semantics (review #17): `MAX_CHAIN_DEPTH` counts **levels**, root =
  * level 1. A chain survives with at most MAX_CHAIN_DEPTH levels — i.e. the
  * root's descendant edge count is ≤ MAX_CHAIN_DEPTH − 1. */
 export function validateDraft(draft: ChainNodeDraft): DraftValidation {
-	const errors: string[] = [];
 	const warnings: string[] = [];
 	const budget = { left: MAX_CHAIN_NODES };
 
@@ -491,7 +507,7 @@ export function validateDraft(draft: ChainNodeDraft): DraftValidation {
 
 	budget.left -= 1; // the root itself
 	const clamped = walk(draft, 1, draft.id || 'root');
-	return { ok: errors.length === 0, errors, warnings, draft: clamped };
+	return { warnings, draft: clamped };
 }
 
 /** Count tree levels (root alone = 1). */
@@ -675,15 +691,27 @@ export async function expandNode(
 	if (node.location.resolveStatus !== 'ok' || !pos) {
 		return { added: [], error: `node \`${node.id}\` has no resolved position to expand from` };
 	}
-	const items = await lsp.prepareCallHierarchy(node.location.uri, pos).catch(() => [] as LspItem[]);
+	let items: LspItem[];
+	try {
+		items = await lsp.prepareCallHierarchy(node.location.uri, pos);
+	} catch (e) {
+		return { added: [], error: `call hierarchy preparation failed: ${errorText(e)}` };
+	}
 	const anchor = items[0];
 	if (!anchor) {
 		return { added: [], error: 'call hierarchy is unavailable for this node (no language provider)' };
 	}
-	const related =
-		direction === 'callees'
-			? await lsp.outgoingCalls(anchor).catch(() => [] as LspItem[])
-			: await lsp.incomingCalls(anchor).catch(() => [] as LspItem[]);
+	// A rejection from `provide*` is a real failure, not an empty level: turn
+	// it into an `error` so the tool reports it, instead of a silent
+	// `{added:[]}` the model reads as "no edges here" (review round-2,
+	// critical).
+	let related: LspItem[];
+	try {
+		related = direction === 'callees' ? await lsp.outgoingCalls(anchor) : await lsp.incomingCalls(anchor);
+	} catch (e) {
+		const edge = direction === 'callees' ? 'outgoing' : 'incoming';
+		return { added: [], error: `${edge} call expansion failed: ${errorText(e)}` };
+	}
 	const added: ExpandOutcome['added'] = [];
 	const seen = new Set<string>();
 	for (const item of related) {
@@ -699,27 +727,4 @@ export async function expandNode(
 		});
 	}
 	return { added };
-}
-
-/** Type-hierarchy expansion for `interface` nodes (§5 candidate seeds). */
-export async function expandImplementations(
-	lsp: LspClient,
-	workspace: WorkspaceView,
-	node: ResolvedNode,
-): Promise<ExpandOutcome> {
-	const pos = anchorPosition(node.location);
-	if (!pos) return { added: [], error: `node \`${node.id}\` is unresolved` };
-	const items = await lsp.prepareTypeHierarchy(node.location.uri, pos).catch(() => [] as LspItem[]);
-	const anchor = items[0];
-	if (!anchor) return { added: [], error: 'type hierarchy unavailable' };
-	const subs = await lsp.subtypes(anchor).catch(() => [] as LspItem[]);
-	return {
-		added: subs.map((s) => ({
-			id: `impl:${expansionKey(workspace, s.name, s.uri)}`,
-			label: s.name,
-			uri: s.uri,
-			range: s.selectionRange,
-			provenance: 'typeHierarchy' as NodeProvenance,
-		})),
-	};
 }

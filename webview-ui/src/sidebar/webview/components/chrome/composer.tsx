@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { ApprovalMode, CommandEntry, ImageAttachment, ModelInfo, ReasoningEffort } from '../../../../protocol';
 import { mintRpcId, onComposePrefill, ThreadApi } from '../../api/client';
+import { shouldApplyComposePrefill } from '../../lib/compose-prefill';
 import { hasCommandKey, t, type I18nKey } from '../../lib/i18n';
 import { enterAction } from '../../lib/ime';
 import { recallStep } from '../../lib/turn-recall';
@@ -234,12 +235,13 @@ export const Composer = ({
 
   // A host `compose` note (panel Regenerate / "从该节点重新生成", §10):
   // backfill the question verbatim and refocus so the user edits/sends it
-  // as their own turn. Two guards (review #16):
+  // as their own turn. Two guards (review #16, round-2 issue):
   //   * SESSION OWNERSHIP — the note names the session it was generated
-  //     for; if the composer now shows a different thread, drop it rather
-  //     than leaking a `/codechain …` into the wrong conversation. The
-  //     `sessionIdRef` mirror keeps the long-lived subscription reading the
-  //     current value (the effect runs once).
+  //     for; the composer applies it ONLY when it is showing that exact
+  //     thread. A draft composer (`sessionId === null`) must NEVER receive a
+  //     note owned by another session (an early `owner && current && …`
+  //     form short-circuited past the null and leaked foreign `/codechain …`
+  //     into a new thread). `shouldApplyComposePrefill` encodes the rule.
   //   * DRAFT SAFETY — a non-empty unsent draft is never silently
   //     overwritten; we focus and let the user decide (no auto-submit).
   const textRef = useRef(text);
@@ -247,7 +249,7 @@ export const Composer = ({
   useEffect(
     () =>
       onComposePrefill((prefill, ownerSessionId) => {
-        if (ownerSessionId && sessionIdRef.current && ownerSessionId !== sessionIdRef.current) return;
+        if (!shouldApplyComposePrefill(ownerSessionId, sessionIdRef.current)) return;
         if (textRef.current.trim() === '') setText(prefill);
         requestAnimationFrame(() => textareaRef.current?.focus());
       }),

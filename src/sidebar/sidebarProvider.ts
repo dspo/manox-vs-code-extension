@@ -52,8 +52,22 @@ export type ToWebview =
 
 let activeProvider: ManoxSidebarProvider | null = null;
 
+/** A `compose` prefill posted before the sidebar view exists would be
+ * dropped outright (the panel's Regenerate right after a window reload is
+ * exactly that race). Stash the most recent one and replay it the moment a
+ * view resolves — the same "host push can outrun the bundle" concern
+ * `panel.ts` answers with its `{t:'ready'}` handshake, handled here at the
+ * resolve boundary instead (review round-2, suggestion 7). Only `compose`
+ * (a one-shot, idempotent prefill) is stashed; frames/verbs are live and
+ * must not replay. */
+let pendingCompose: Extract<ToWebview, { kind: 'compose' }> | null = null;
+
 /** Post a message to the live sidebar webview (no-op when closed). */
 export function postToSidebar(message: ToWebview): void {
+	if (message.t === 'verb' && message.kind === 'compose' && !activeProvider) {
+		pendingCompose = message;
+		return;
+	}
 	activeProvider?.post(message);
 }
 
@@ -118,6 +132,13 @@ class ManoxSidebarProvider implements vscode.WebviewViewProvider {
 				cwd: resolveWorkspaceCwd(),
 				approvalMode: configuredApprovalMode(),
 			});
+			// A panel Regenerate that fired before this view resolved was
+			// stashed rather than dropped; replay it now the webview exists
+			// (review round-2, suggestion 7).
+			if (pendingCompose) {
+				this.post(pendingCompose);
+				pendingCompose = null;
+			}
 		} catch (e) {
 			this.post({ t: 'fatal', message: errorText(e) });
 		}

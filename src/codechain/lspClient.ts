@@ -13,6 +13,7 @@
 //     outlasts the server's 300s tool CALL_TIMEOUT (review #10).
 
 import * as vscode from 'vscode';
+import { errorText } from '../util';
 import type { ChainRange } from './types';
 import type { LspClient, LspItem, LspLocation, LspSymbol, WorkspaceView } from './resolve';
 import { PROVIDER_TIMEOUT_MS } from './resolve';
@@ -24,11 +25,17 @@ const chainRange = (r: vscode.Range): ChainRange => ({
 	endCharacter: r.end.character,
 });
 
+/** Stamp the plain-data mirror AND keep the real provider item as `handle`.
+ * The `provide*` commands `instanceof`-check their argument and route on
+ * hidden `_sessionId`/`_itemId` fields that only a materialized
+ * `prepare*`/`type*` item carries — so the exact object returned here must be
+ * the one handed back to those commands (review round-2, critical). */
 const callItem = (item: vscode.CallHierarchyItem | vscode.TypeHierarchyItem): LspItem => ({
 	name: item.name,
 	uri: item.uri.toString(),
 	range: chainRange(item.range),
 	selectionRange: chainRange(item.selectionRange),
+	handle: item,
 });
 
 /** DocumentSymbol[] (hierarchical). `SymbolInformation[]` (flat, legacy
@@ -48,7 +55,9 @@ function toSymbols(symbols: vscode.DocumentSymbol[] | vscode.SymbolInformation[]
 }
 
 /** Race a provider command against the per-call budget, swallowing both
- * provider absence (rejected command) and a timeout into `onStall`. */
+ * provider absence (rejected command) and a timeout into `onStall`. For the
+ * resolution probes only, where "nothing found" is a legitimate, recoverable
+ * answer that the fallback chain expects. */
 async function provider<T>(command: string, onStall: T, ...args: unknown[]): Promise<T> {
 	// executeCommand returns a Thenable that rejects for an unknown command;
 	// coerce it, then race the settled promise against the timeout. A
@@ -62,6 +71,29 @@ async function provider<T>(command: string, onStall: T, ...args: unknown[]): Pro
 	});
 	try {
 		return (await Promise.race([call, stall])) ?? onStall;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/** Hierarchy `provide*` command: still bounded by the liveness budget, but a
+ * rejection is NEVER folded into an empty result. An absent provider answers
+ * `[]` at the command layer (so a genuine "no edges" still resolves empty);
+ * anything that rejects — a broken `instanceof`/`_itemId` argument, a
+ * provider crash — is logged and rethrown, so the tool reports a real failure
+ * instead of the false "no new edges at this level" (review round-2,
+ * critical). */
+async function hierarchyProvider<T>(command: string, ...args: unknown[]): Promise<T[]> {
+	const call = Promise.resolve(vscode.commands.executeCommand<T[]>(command, ...args));
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const stall = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => reject(new Error(`${command} timed out`)), PROVIDER_TIMEOUT_MS);
+	});
+	try {
+		return (await Promise.race([call, stall])) ?? [];
+	} catch (e) {
+		console.error(`manox codechain: ${command} failed`, e);
+		throw new Error(`${command} failed: ${errorText(e)}`);
 	} finally {
 		clearTimeout(timer);
 	}
@@ -116,22 +148,23 @@ export class VscodeLspClient implements LspClient {
 			doc.uri,
 			position(pos.line, pos.character),
 		);
+		// `callItem` keeps the real vscode item as `handle`; the core relays
+		// this LspItem unchanged back to `outgoing`/`incomingCalls`, which
+		// forward the handle to the `provide*` command.
 		return items.map(callItem);
 	}
 
 	async outgoingCalls(item: LspItem): Promise<LspItem[]> {
-		const calls = await provider<vscode.CallHierarchyOutgoingCall[]>(
+		const calls = await hierarchyProvider<vscode.CallHierarchyOutgoingCall>(
 			'vscode.provideOutgoingCalls',
-			NONE,
 			this.anchor(item),
 		);
 		return calls.map((c) => callItem(c.to));
 	}
 
 	async incomingCalls(item: LspItem): Promise<LspItem[]> {
-		const calls = await provider<vscode.CallHierarchyIncomingCall[]>(
+		const calls = await hierarchyProvider<vscode.CallHierarchyIncomingCall>(
 			'vscode.provideIncomingCalls',
-			NONE,
 			this.anchor(item),
 		);
 		return calls.map((c) => callItem(c.from));
@@ -153,54 +186,20 @@ export class VscodeLspClient implements LspClient {
 	}
 
 	async subtypes(item: LspItem): Promise<LspItem[]> {
-		const subs = await provider<vscode.TypeHierarchyItem[]>('vscode.provideSubtypes', NONE, this.anchor(item));
+		const subs = await hierarchyProvider<vscode.TypeHierarchyItem>('vscode.provideSubtypes', this.anchor(item));
 		return subs.map(callItem);
 	}
 
-	async supertypes(item: LspItem): Promise<LspItem[]> {
-		const supers = await provider<vscode.TypeHierarchyItem[]>('vscode.provideSupertypes', NONE, this.anchor(item));
-		return supers.map(callItem);
-	}
-
-	async references(
-		uri: string,
-		pos: { line: number; character: number },
-	): Promise<LspLocation[]> {
-		const doc = await this.open(uri);
-		if (!doc) return [];
-		const locs = await provider<vscode.Location[]>('vscode.executeReferenceProvider', NONE, doc.uri, position(pos.line, pos.character));
-		return locs.map((l) => ({ uri: l.uri.toString(), range: chainRange(l.range) }));
-	}
-
-	async implementations(
-		uri: string,
-		pos: { line: number; character: number },
-	): Promise<LspLocation[]> {
-		const doc = await this.open(uri);
-		if (!doc) return [];
-		const locs = await provider<vscode.Location[]>('vscode.executeImplementationProvider', NONE, doc.uri, position(pos.line, pos.character));
-		return locs.map((l) => ({ uri: l.uri.toString(), range: chainRange(l.range) }));
-	}
-
-	/** Providers are item-identity keyed; hand back the original item shape
-	 * they issued from (VS Code matches on uri+range internally). */
-	private anchor(item: LspItem): unknown {
-		return {
-			uri: vscode.Uri.parse(item.uri),
-			name: item.name,
-			range: new vscode.Range(
-				item.range.startLine,
-				item.range.startCharacter,
-				item.range.endLine,
-				item.range.endCharacter,
-			),
-			selectionRange: new vscode.Range(
-				item.selectionRange.startLine,
-				item.selectionRange.startCharacter,
-				item.selectionRange.endLine,
-				item.selectionRange.endCharacter,
-			),
-		};
+	/** Forward the EXACT real provider item `callItem` stored under `handle`,
+	 * not a rebuilt literal — VS Code `instanceof`-checks this argument and
+	 * routes on `_sessionId`/`_itemId` fields only a `prepare*` item carries
+	 * (review round-2, critical). A `provide*` call is always reached from a
+	 * real `prepare*` item, so the handle is present. */
+	private anchor(item: LspItem): vscode.CallHierarchyItem | vscode.TypeHierarchyItem {
+		if (!item.handle) {
+			throw new Error(`hierarchy item \`${item.name}\` lost its provider handle`);
+		}
+		return item.handle as vscode.CallHierarchyItem | vscode.TypeHierarchyItem;
 	}
 
 	/** Open without focusing; the document must be material for most

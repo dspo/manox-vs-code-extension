@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 
 import fixtures from '../../test-fixtures/codechain-cases.json';
 import type { ChainNodeDraft, CodeChain } from './types';
-import { MAX_CHAIN_DEPTH, MAX_CHAIN_NODES } from './types';
+import { MAX_CHAIN_DEPTH, MAX_CHAIN_NODES, MAX_SUMMARY_CHARS } from './types';
 import {
 	type LspClient,
 	type LspItem,
@@ -72,16 +72,7 @@ class FakeLsp implements LspClient {
 	async prepareTypeHierarchy(): Promise<LspItem[]> {
 		return [];
 	}
-	async supertypes(): Promise<LspItem[]> {
-		return [];
-	}
 	async subtypes(): Promise<LspItem[]> {
-		return [];
-	}
-	async references(): Promise<LspLocation[]> {
-		return [];
-	}
-	async implementations(): Promise<LspLocation[]> {
 		return [];
 	}
 }
@@ -344,6 +335,165 @@ describe('call-hierarchy expansion (§4, no LLM)', () => {
 		};
 		const outcome = await expandNode(lsp, workspace, target, 'callers', new Set());
 		expect(outcome.error).toContain('call hierarchy');
+	});
+
+	// Review round-2 (critical): VS Code `provide*` commands `instanceof`-check
+	// their argument and route on hidden fields only a real `prepare*` item
+	// carries, so the adapter must receive the EXACT item (and its opaque
+	// `handle`) back — never a rebuilt literal. This drives the seam the
+	// adapter's `anchor()` relies on: the core must relay the `prepare*` item
+	// object unchanged into `provide*`.
+	it('relays the prepare* item (and its handle) unchanged into provide*', async () => {
+		const handle = { vscodeIdentity: 'real-call-hierarchy-item' };
+		const prepared: LspItem = {
+			name: 'OrderService',
+			uri: anchorUri,
+			range: rng(41),
+			selectionRange: rng(41),
+			handle,
+		};
+		let seenItem: LspItem | undefined;
+		const lsp: LspClient = {
+			async documentSymbols() {
+				return [];
+			},
+			async readText() {
+				return '';
+			},
+			async workspaceSymbols() {
+				return [];
+			},
+			async prepareCallHierarchy() {
+				return [prepared];
+			},
+			async outgoingCalls(item) {
+				seenItem = item;
+				return [];
+			},
+			async incomingCalls(item) {
+				seenItem = item;
+				return [];
+			},
+			async prepareTypeHierarchy() {
+				return [];
+			},
+			async subtypes() {
+				return [];
+			},
+		};
+		const target = {
+			id: 'a',
+			label: 'create',
+			kind: 'call' as const,
+			summary: '',
+			provenance: 'llm' as const,
+			location: { uri: anchorUri, range: rng(41), selectionRange: rng(41), resolveStatus: 'ok' as const },
+			children: [],
+		};
+		const outcome = await expandNode(lsp, workspace, target, 'callees', new Set());
+		expect(outcome.error).toBeUndefined();
+		expect(seenItem).toBe(prepared);
+		expect(seenItem?.handle).toBe(handle);
+	});
+
+	it('expandNode surfaces a provider rejection as an error, not an empty level', async () => {
+		const handle = { vscodeIdentity: 'item' };
+		const lsp: LspClient = {
+			async documentSymbols() {
+				return [];
+			},
+			async readText() {
+				return '';
+			},
+			async workspaceSymbols() {
+				return [];
+			},
+			async prepareCallHierarchy() {
+				return [{ name: 'OrderService', uri: anchorUri, range: rng(41), selectionRange: rng(41), handle }];
+			},
+			async outgoingCalls(): Promise<LspItem[]> {
+				throw new Error('Invalid argument `item` when running vscode.provideOutgoingCalls');
+			},
+			async incomingCalls(): Promise<LspItem[]> {
+				throw new Error('boom');
+			},
+			async prepareTypeHierarchy() {
+				return [];
+			},
+			async subtypes() {
+				return [];
+			},
+		};
+		const target = {
+			id: 'a',
+			label: 'create',
+			kind: 'call' as const,
+			summary: '',
+			provenance: 'llm' as const,
+			location: { uri: anchorUri, range: rng(41), selectionRange: rng(41), resolveStatus: 'ok' as const },
+			children: [],
+		};
+		const outcome = await expandNode(lsp, workspace, target, 'callees', new Set());
+		expect(outcome.added).toEqual([]);
+		expect(outcome.error).toContain('provideOutgoingCalls');
+	});
+
+	it('expandNode surfaces a prepare rejection as an error, not the false no-provider', async () => {
+		const lsp: LspClient = {
+			async documentSymbols() {
+				return [];
+			},
+			async readText() {
+				return '';
+			},
+			async workspaceSymbols() {
+				return [];
+			},
+			async prepareCallHierarchy(): Promise<LspItem[]> {
+				throw new Error('server crashed');
+			},
+			async outgoingCalls() {
+				return [];
+			},
+			async incomingCalls() {
+				return [];
+			},
+			async prepareTypeHierarchy() {
+				return [];
+			},
+			async subtypes() {
+				return [];
+			},
+		};
+		const target = {
+			id: 'a',
+			label: 'create',
+			kind: 'call' as const,
+			summary: '',
+			provenance: 'llm' as const,
+			location: { uri: anchorUri, range: rng(41), selectionRange: rng(41), resolveStatus: 'ok' as const },
+			children: [],
+		};
+		const outcome = await expandNode(lsp, workspace, target, 'callees', new Set());
+		expect(outcome.error).toContain('server crashed');
+	});
+});
+
+describe('validateDraft (cap truncation, no dead error channel)', () => {
+	// Review round-2 (suggestion 4): validateDraft only truncates and warns;
+	// it never produced `errors`, so the old `{ok, errors}` shell was a dead
+	// contract. Assert the shape the tool actually relies on.
+	it('reports cap violations as warnings while returning a clamped draft', () => {
+		const deep: ChainNodeDraft = {
+			id: 'r',
+			label: 'r',
+			kind: 'entry',
+			file: '',
+			summary: 's'.repeat(MAX_SUMMARY_CHARS + 10),
+		};
+		const { draft, warnings } = validateDraft(deep);
+		expect(warnings.some((w) => w.includes('summary truncated'))).toBe(true);
+		expect(draft.summary.length).toBe(MAX_SUMMARY_CHARS);
 	});
 });
 

@@ -222,14 +222,21 @@ export class CodeChainTools {
 		if (!input) return failText(reply, 'GenCodeChain input must be an object');
 		const title = asString(input.title);
 		const question = asString(input.question) ?? '';
-		const rootDraft = parseDraft(input.root, '');
-		if (!title || !rootDraft) {
+		const rootParse = parseDraft(input.root, '');
+		if (!title || !rootParse.draft) {
 			return failText(
 				reply,
 				'GenCodeChain requires `title` and a `root` node with {id,label,kind,file,summary}; every child needs the same shape',
 			);
 		}
-		const { draft, errors, warnings } = validateDraft(rootDraft);
+		const { draft, warnings } = validateDraft(rootParse.draft);
+		// Malformed nodes `parseDraft` dropped are reported as failures so the
+		// model can repair them (review round-2, issue: they used to vanish
+		// silently while the reply still claimed the tree was fine).
+		const dropped: { id: string; reason: string }[] = rootParse.dropped.map((where) => ({
+			id: where,
+			reason: `dropped \`${where}\` — missing/invalid id, label, or kind (see the tool schema)`,
+		}));
 		const key = `${call.sessionId}:${draft.id}`;
 		const { chain, failures } = await resolveChain(this.deps, {
 			sessionId: call.sessionId,
@@ -237,8 +244,8 @@ export class CodeChainTools {
 			question,
 			root: draft,
 		});
-		if (errors.length > 0) {
-			failures.unshift(...errors.map((reason) => ({ id: draft.id, reason })));
+		if (dropped.length > 0) {
+			failures.unshift(...dropped);
 		}
 		if (failures.length > 0) {
 			const attempts = (this.correctionAttempts.get(key) ?? 0) + 1;
@@ -382,7 +389,16 @@ export class CodeChainTools {
 		const fixed: string[] = [];
 		const reroll = async (node: ResolvedNode): Promise<ResolvedNode> => {
 			const children: ResolvedNode[] = [];
-			for (const child of node.children) children.push(await reroll(child));
+			// `children === node.children` is never true (a fresh array each
+			// pass), so a structural no-op can't be detected by reference —
+			// compare the re-resolved children element-wise instead (review
+			// round-2, suggestion 5).
+			let childrenChanged = false;
+			for (const [i, child] of node.children.entries()) {
+				const next = await reroll(child);
+				if (next !== child) childrenChanged = true;
+				children.push(next);
+			}
 			// A node with no claimed position (note, or file-miss) has
 			// nothing to re-resolve — re-locating by text would invent one.
 			if (
@@ -391,7 +407,7 @@ export class CodeChainTools {
 				node.location.symbolPath === undefined ||
 				node.location.symbolPath.length === 0
 			) {
-				return children === node.children ? node : { ...node, children };
+				return childrenChanged ? { ...node, children } : node;
 			}
 			const symbol = node.location.symbolPath.join('.');
 			const hit = await resolveSymbol(this.deps.lsp, node.location.uri, symbol, node.kind);
@@ -401,7 +417,9 @@ export class CodeChainTools {
 				hit.location.range.startLine === node.location.range.startLine &&
 				hit.location.range.endLine === node.location.range.endLine;
 			if (node.location.resolveStatus === 'ok') {
-				if (same) return { ...node, children };
+				// Position unchanged: only rebuild if a descendant moved, else
+				// hand back the SAME node so a no-op refresh re-pushes nothing.
+				if (same) return childrenChanged ? { ...node, children } : node;
 				if (hit.location.resolveStatus === 'ok') {
 					moved.push(node.id);
 					return { ...node, children, location: { ...hit.location, file: node.location.file } };
@@ -413,12 +431,16 @@ export class CodeChainTools {
 				fixed.push(node.id);
 				return { ...node, children, location: { ...hit.location, file: node.location.file } };
 			}
-			return { ...node, children, location: hit.location };
+			return childrenChanged || hit.location !== node.location
+				? { ...node, children, location: hit.location }
+				: node;
 		};
 		const root = await reroll(chain.root);
 		const next = withStats({ ...chain, root });
-		this.store.save(next);
-		this.sinks.updateChain(next);
+		if (root !== chain.root) {
+			this.store.save(next);
+			this.sinks.updateChain(next);
+		}
 		return ok(reply, {
 			ok: true,
 			chainId: next.chainId,
@@ -468,26 +490,33 @@ const KINDS: ReadonlySet<string> = new Set([
 	'note',
 ]);
 
-/** Parse one draft node recursively; null on shape errors (the caps are
- * `validateDraft`'s job — this only enforces required vocabulary so the
- * resolver never sees a junk kind). */
-function parseDraft(raw: unknown, path: string): ChainNodeDraft | null {
+/** Parse one draft node recursively. The caps are `validateDraft`'s job —
+ * this only enforces required vocabulary so the resolver never sees a junk
+ * kind, and it REPORTS every child it has to drop: a silently-omitted node
+ * reads back to the model as a successful tree (review round-2, issue).
+ * `dropped` carries a path locating each discarded node (e.g.
+ * `root/children[2]`), accumulating from the root down. */
+function parseDraft(raw: unknown, path: string): { draft: ChainNodeDraft | null; dropped: string[] } {
+	const dropped: string[] = [];
 	const node = asRecord(raw);
-	if (!node) return null;
+	if (!node) return { draft: null, dropped };
 	const id = asString(node.id);
 	const label = asString(node.label);
 	const kind = asString(node.kind);
 	const file = asString(node.file) ?? '';
 	const summary = asString(node.summary) ?? '';
-	if (!id || !label || !kind || !KINDS.has(kind)) return null;
+	if (!id || !label || !kind || !KINDS.has(kind)) return { draft: null, dropped };
 	const children: ChainNodeDraft[] = [];
 	if (Array.isArray(node.children)) {
 		for (const [i, child] of node.children.entries()) {
-			const parsed = parseDraft(child, `${path}/${id}#${i}`);
-			if (parsed) children.push(parsed);
+			const childPath = `${path}/${id}/children[${i}]`;
+			const childResult = parseDraft(child, childPath);
+			dropped.push(...childResult.dropped);
+			if (childResult.draft) children.push(childResult.draft);
+			else dropped.push(childPath);
 		}
 	}
-	return {
+	const draft: ChainNodeDraft = {
 		id,
 		label,
 		kind: kind as ChainNodeDraft['kind'],
@@ -497,6 +526,7 @@ function parseDraft(raw: unknown, path: string): ChainNodeDraft | null {
 		...(asString(node.edgeNote) !== null ? { edgeNote: asString(node.edgeNote) as string } : {}),
 		children,
 	};
+	return { draft, dropped };
 }
 
 // ── tree helpers (shared with panel/navigation via the store) ───────────────

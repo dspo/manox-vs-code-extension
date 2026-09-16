@@ -40,16 +40,7 @@ const emptyLsp: LspClient = {
 	async prepareTypeHierarchy(): Promise<LspItem[]> {
 		return [];
 	},
-	async supertypes(): Promise<LspItem[]> {
-		return [];
-	},
 	async subtypes(): Promise<LspItem[]> {
-		return [];
-	},
-	async references() {
-		return [];
-	},
-	async implementations() {
 		return [];
 	},
 };
@@ -260,6 +251,23 @@ describe('Expand / Annotate / Refresh', () => {
 		expect(Array.isArray(body.fixed)).toBe(true);
 	});
 
+	// Review round-2 (suggestion 5): the old `children === node.children`
+	// short-circuit was always false (a fresh array each pass), so even a
+	// refresh that moved nothing rebuilt the whole tree and re-pushed it.
+	it('a refresh where no position moved re-pushes nothing (review round-2)', async () => {
+		const t = await genOk();
+		// okRoot resolves to the same range on re-resolve → pure no-op.
+		const r = t.reply();
+		await t.tools.handle(call('RefreshCodeChain', { chainId: 'cc-1' }), r.sinks);
+		expect(r.calls[0]?.isError).toBe(false);
+		const body = parsed(r.calls[0]?.content);
+		expect(body.moved).toEqual([]);
+		expect(body.stale).toEqual([]);
+		expect(body.fixed).toEqual([]);
+		// `updateChain` (the panel re-push sink) must not fire on a no-op.
+		expect(t.updated).toHaveLength(0);
+	});
+
 	it('an unknown tool name is not handled (caller fail-closes)', async () => {
 		const { tools, reply } = makeTools();
 		const handled = await tools.handle(call('SomeOtherTool', {}), reply().sinks);
@@ -291,4 +299,121 @@ describe('every tool answers non-object / missing-chainId input (review #5)', ()
 			expect(r.calls[0]).toBeTruthy();
 		});
 	}
+});
+
+// Review round-2 (issue): a malformed CHILD node used to be dropped by
+// `parseDraft` with no trace, so the model got `ok:true` for a tree that had
+// quietly lost nodes — it could never repair what it didn't know was gone.
+describe('GenCodeChain reports dropped malformed children', () => {
+	it('a child missing `kind` is dropped and surfaced as a failure with a path', async () => {
+		const { tools, shown, reply } = makeTools();
+		const r = reply();
+		await tools.handle(
+			call('GenCodeChain', {
+				title: 't',
+				question: 'q',
+				root: {
+					...okRoot,
+					children: [
+						{ id: 'c0', label: 'c0', kind: 'call', file: 'src/order/handler.ts', symbol: 'OrderController.createOrder', summary: 'ok child' },
+						{ id: 'c1', label: 'c1', file: 'src/order/handler.ts', symbol: 'x', summary: 'no kind' },
+					],
+				},
+			}),
+			r.sinks,
+		);
+		const out = r.calls[0];
+		expect(out?.isError).toBe(true);
+		const body = parsed(out?.content);
+		expect(shown).toHaveLength(0);
+		const failures = body.failures as { nodeId: string }[];
+		// The dropped node is identified by a tree path, not silently gone.
+		expect(failures.some((f) => f.nodeId.includes('children[1]'))).toBe(true);
+	});
+
+	it('a child with an out-of-vocabulary kind is dropped and reported', async () => {
+		const { tools, reply } = makeTools();
+		const r = reply();
+		await tools.handle(
+			call('GenCodeChain', {
+				title: 't',
+				question: 'q',
+				root: {
+					...okRoot,
+					children: [{ id: 'w', label: 'w', kind: 'widget', file: 'a.ts', symbol: 'x', summary: 'bad kind' }],
+				},
+			}),
+			r.sinks,
+		);
+		const body = parsed(r.calls[0]?.content);
+		expect(body.failures).toEqual(expect.arrayContaining([expect.objectContaining({ nodeId: expect.stringContaining('children[0]') })]));
+	});
+});
+
+// Review round-2 (critical): once the handle bug is fixed, a genuine `provide*`
+// rejection must reach the model as a tool ERROR — never collapse to the
+// `{ok:true, note:'no new edges at this level'}` lie.
+describe('ExpandCodeChainNode reports provider failures honestly', () => {
+	it('a provideOutgoingCalls rejection answers isError (not "no new edges")', async () => {
+		const { sink } = makeSink();
+		const store = new ChainStore(sink);
+		const range = { startLine: 1, startCharacter: 0, endLine: 2, endCharacter: 0 };
+		store.save({
+			chainId: 'cc-e',
+			sessionId: 's1',
+			title: 't',
+			question: 'q',
+			createdAt: 0,
+			stats: { nodeCount: 1, unresolvedCount: 0 },
+			root: {
+				id: 'n1',
+				label: 'n1',
+				kind: 'call',
+				summary: '',
+				provenance: 'llm',
+				location: { uri: 'file:///repo/src/order/handler.ts', selectionRange: range, range, resolveStatus: 'ok' },
+				children: [],
+			},
+		});
+		const lsp: LspClient = {
+			async documentSymbols() {
+				return [];
+			},
+			async readText() {
+				return '';
+			},
+			async workspaceSymbols() {
+				return [];
+			},
+			async prepareCallHierarchy(): Promise<LspItem[]> {
+				return [{ name: 'n1', uri: 'file:///repo/src/order/handler.ts', range, selectionRange: range, handle: { id: 'real' } }];
+			},
+			async outgoingCalls(): Promise<LspItem[]> {
+				throw new Error('Invalid argument `item` when running vscode.provideOutgoingCalls');
+			},
+			async incomingCalls(): Promise<LspItem[]> {
+				return [];
+			},
+			async prepareTypeHierarchy() {
+				return [];
+			},
+			async subtypes() {
+				return [];
+			},
+		};
+		const updated: CodeChain[] = [];
+		const tools = new CodeChainTools(
+			{ lsp, workspace, mintChainId: () => 'cc-e', now: () => 0 },
+			store,
+			{ showChain: () => undefined, updateChain: (c) => updated.push(c), verb: () => undefined, log: () => undefined },
+		);
+		const calls: { content?: string; isError?: boolean }[] = [];
+		await tools.handle(
+			{ sessionId: 's1', name: 'ExpandCodeChainNode', input: { chainId: 'cc-e', nodeId: 'n1', direction: 'callees' } },
+			{ ok: (content, isError) => calls.push({ content, isError }), err: (message) => calls.push({ content: message }) },
+		);
+		expect(calls[0]?.isError).toBe(true);
+		expect(calls[0]?.content).toContain('provideOutgoingCalls');
+		expect(updated).toHaveLength(0);
+	});
 });

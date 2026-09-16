@@ -214,7 +214,17 @@ export class CodeChainPanel {
 				if (this.chain) void this.navigation.findReferences(this.chain, msg.nodeId);
 				return;
 			case 'regen':
-				this.sinks.compose(`/codechain ${msg.question}`, this.chain?.sessionId ?? '');
+				// The compose prefill is ownership-scoped: it is only ever
+				// accepted by the composer showing the owning thread
+				// (`shouldApplyComposePrefill`). A note without a real
+				// sessionId would be dropped there anyway, so don't send a
+				// malformed one (review round-2, issue — `?? ''` used to let
+				// an empty owner through).
+				if (!this.chain?.sessionId) {
+					this.sinks.log('regen dropped: no owning session for the open chain');
+					return;
+				}
+				this.sinks.compose(`/codechain ${msg.question}`, this.chain.sessionId);
 				return;
 			case 'log':
 				this.sinks.log(`panel[${msg.level}]: ${msg.message}`);
