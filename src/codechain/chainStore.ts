@@ -190,6 +190,14 @@ export function replaceNode(
 	return { root: spine.value, found: spine.found };
 }
 
+/** Whole-tree node count — the same fold `withStats` uses for
+ * `stats.nodeCount`, exposed for the Extend path's cap re-check (§3). */
+export function countNodes(node: ResolvedNode): number {
+	let n = 1;
+	for (const child of node.children) n += countNodes(child);
+	return n;
+}
+
 /** Recompute `stats` from the tree (§3: nodeCount/unresolvedCount). */
 export function withStats(chain: CodeChain): CodeChain {
 	let nodeCount = 0;

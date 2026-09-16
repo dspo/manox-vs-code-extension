@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 
 import fixtures from '../../test-fixtures/codechain-cases.json';
 import type { ChainNodeDraft, CodeChain } from './types';
-import { MAX_CHAIN_DEPTH, MAX_CHAIN_NODES, MAX_SUMMARY_CHARS } from './types';
+import { MAX_BEAT_CHARS, MAX_CHAIN_DEPTH, MAX_CHAIN_NODES, MAX_NARRATIVE_CHARS, MAX_SUMMARY_CHARS } from './types';
 import {
 	type LspClient,
 	type LspItem,
@@ -295,6 +295,58 @@ describe('§3 caps (exact semantics, review #17)', () => {
 		const count = (n: ChainNodeDraft): number => 1 + (n.children ?? []).reduce((a, c) => a + count(c), 0);
 		expect(count(draft)).toBe(MAX_CHAIN_NODES);
 		expect(warnings.some((w) => w.includes('node(s) dropped'))).toBe(true);
+	});
+
+	it('truncates an over-cap node beat and reports it', () => {
+		const { draft, warnings } = validateDraft({
+			id: 'r',
+			label: 'r',
+			kind: 'entry',
+			file: '',
+			summary: 's',
+			beat: 'b'.repeat(MAX_BEAT_CHARS + 10),
+		});
+		expect(warnings.some((w) => w.includes('beat truncated'))).toBe(true);
+		expect(draft.beat?.length).toBe(MAX_BEAT_CHARS);
+	});
+
+	it('truncates an over-cap chain narrative and returns the clamped value', () => {
+		const { warnings, narrative } = validateDraft(
+			{ id: 'r', label: 'r', kind: 'entry', file: '', summary: 's' },
+			'n'.repeat(MAX_NARRATIVE_CHARS + 50),
+		);
+		expect(warnings.some((w) => w.includes('narrative truncated'))).toBe(true);
+		expect(narrative?.length).toBe(MAX_NARRATIVE_CHARS);
+	});
+
+	it('a within-cap narrative + beat survive untouched (no warnings)', () => {
+		const { draft, warnings, narrative } = validateDraft(
+			{ id: 'r', label: 'r', kind: 'entry', file: '', summary: 's', beat: '一拍' },
+			'故事',
+		);
+		expect(draft.beat).toBe('一拍');
+		expect(narrative).toBe('故事');
+		expect(warnings).toEqual([]);
+	});
+
+	it('resolveChain passes the optional narrative through to the chain (§3)', async () => {
+		const draft: ChainNodeDraft = { id: 'r', label: 'r', kind: 'note', file: '', summary: 's' };
+		const withNarrative = await resolveChain(deps(new FakeLsp()), {
+			sessionId: 's',
+			title: 't',
+			question: 'q',
+			root: draft,
+			narrative: '业务故事',
+		});
+		expect(withNarrative.chain.narrative).toBe('业务故事');
+		// Absent narrative keeps the field off the wire (store compat).
+		const without = await resolveChain(deps(new FakeLsp()), {
+			sessionId: 's',
+			title: 't',
+			question: 'q',
+			root: draft,
+		});
+		expect('narrative' in without.chain).toBe(false);
 	});
 });
 

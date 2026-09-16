@@ -28,7 +28,13 @@ import type {
 	NodeProvenance,
 	ResolvedNode,
 } from './types';
-import { MAX_CHAIN_DEPTH, MAX_CHAIN_NODES, MAX_SUMMARY_CHARS } from './types';
+import {
+	MAX_BEAT_CHARS,
+	MAX_CHAIN_DEPTH,
+	MAX_CHAIN_NODES,
+	MAX_NARRATIVE_CHARS,
+	MAX_SUMMARY_CHARS,
+} from './types';
 
 // ── injected seams ──────────────────────────────────────────────────────────
 
@@ -462,11 +468,21 @@ export interface DraftValidation {
 	warnings: string[];
 	/** The draft with every §3 cap enforced. */
 	draft: ChainNodeDraft;
+	/** The optional chain narrative as passed in, clamped to
+	 * MAX_NARRATIVE_CHARS when it was over (a cut also adds a warning).
+	 * Undefined when the caller had no narrative. */
+	narrative?: string;
 }
 
-/** Enforce §3 caps over the submitted tree: depth, node budget, summary
- * length — truncating rather than rejecting, and reporting every cut so the
- * model knows what happened.
+/** Enforce §3 caps over the submitted tree — depth, node budget, summary /
+ * beat length, and the optional chain narrative — truncating rather than
+ * rejecting, and reporting every cut so the model knows what happened.
+ *
+ * The narrative rides here (not on the draft) because it is a chain-level
+ * companion text the tools pass alongside the tree: when provided it is
+ * clamped to MAX_NARRATIVE_CHARS and echoed back on the result, so the
+ * caller persists exactly what this face validated (the same one-stop
+ * contract as `summary` — `resolveChain` itself never re-clamps).
  *
  * There is no `errors` channel here by design: a cap violation is a
  * truncation (a `warning`), and a malformed node is a `parseDraft` drop —
@@ -476,7 +492,7 @@ export interface DraftValidation {
  * Depth semantics (review #17): `MAX_CHAIN_DEPTH` counts **levels**, root =
  * level 1. A chain survives with at most MAX_CHAIN_DEPTH levels — i.e. the
  * root's descendant edge count is ≤ MAX_CHAIN_DEPTH − 1. */
-export function validateDraft(draft: ChainNodeDraft): DraftValidation {
+export function validateDraft(draft: ChainNodeDraft, narrative?: string): DraftValidation {
 	const warnings: string[] = [];
 	const budget = { left: MAX_CHAIN_NODES };
 
@@ -489,6 +505,14 @@ export function validateDraft(draft: ChainNodeDraft): DraftValidation {
 				: node.summary;
 		if (node.summary.length > MAX_SUMMARY_CHARS) {
 			warnings.push(`${path}: summary truncated to ${MAX_SUMMARY_CHARS} chars`);
+		}
+		// Beats get the same clamp-and-report treatment as summaries.
+		let beat: string | undefined;
+		if (typeof node.beat === 'string' && node.beat.length > MAX_BEAT_CHARS) {
+			beat = `${node.beat.slice(0, MAX_BEAT_CHARS - 1)}…`;
+			warnings.push(`${path}: beat truncated to ${MAX_BEAT_CHARS} chars`);
+		} else {
+			beat = node.beat;
 		}
 		const children: ChainNodeDraft[] = [];
 		const atDepthCap = depth + 1 > MAX_CHAIN_DEPTH;
@@ -506,12 +530,17 @@ export function validateDraft(draft: ChainNodeDraft): DraftValidation {
 			budget.left -= 1;
 			children.push(walk(child, depth + 1, `${path}/${child.id || `#${i}`}`));
 		}
-		return { ...node, summary, children };
+		return { ...node, summary, beat, children };
 	};
 
 	budget.left -= 1; // the root itself
 	const clamped = walk(draft, 1, draft.id || 'root');
-	return { warnings, draft: clamped };
+	let clampedNarrative = narrative;
+	if (typeof narrative === 'string' && narrative.length > MAX_NARRATIVE_CHARS) {
+		clampedNarrative = `${narrative.slice(0, MAX_NARRATIVE_CHARS - 1)}…`;
+		warnings.push(`narrative truncated to ${MAX_NARRATIVE_CHARS} chars`);
+	}
+	return { warnings, draft: clamped, narrative: clampedNarrative };
 }
 
 /** Count tree levels (root alone = 1). */
@@ -531,10 +560,20 @@ export function treeDepth(root: ChainNodeDraft): number {
  * gets a `resolveStatus`; failures carry reasons the tool reply relays.
  * Resolution is bounded-concurrent across files (provider calls memoized
  * per uri+symbol), so a wedged language server surfaces via the adapter
- * timeout per node and 80 nodes no longer serialize behind it (review #10). */
+ * timeout per node and 48 nodes no longer serialize behind it (review #10).
+ *
+ * The optional `narrative` rides straight onto the chain — caps are
+ * validateDraft's job (§3), so this face persists what it is given. */
 export async function resolveChain(
 	deps: ResolveDeps,
-	input: { chainId?: string; sessionId: string; title: string; question: string; root: ChainNodeDraft },
+	input: {
+		chainId?: string;
+		sessionId: string;
+		title: string;
+		question: string;
+		root: ChainNodeDraft;
+		narrative?: string;
+	},
 ): Promise<{ chain: CodeChain; failures: { id: string; reason: string }[] }> {
 	const failures: { id: string; reason: string }[] = [];
 	// Memoization faces: file → uri (or `ERR <reason>`), and symbol lookup
@@ -601,6 +640,7 @@ export async function resolveChain(
 			kind: node.kind,
 			summary: node.summary,
 			edgeNote: node.edgeNote,
+			beat: node.beat,
 			provenance: 'llm',
 			// Draft path rides the location for display; resolution
 			// rewrites never drop it (pick-candidate / refresh keep it).
@@ -620,6 +660,7 @@ export async function resolveChain(
 			createdAt: deps.now(),
 			root,
 			stats: { nodeCount: countNodes(root), unresolvedCount: unresolved },
+			...(input.narrative !== undefined ? { narrative: input.narrative } : {}),
 		},
 		failures,
 	};
