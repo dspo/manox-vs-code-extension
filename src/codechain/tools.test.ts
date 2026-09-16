@@ -1,4 +1,4 @@
-// The six client tools' reply contract + self-correction loop (§4, §9.3)
+// The seven client tools' reply contract + self-correction loop (§4, §9.3)
 // over the FakeLsp fixture: every business outcome answers `reply.ok
 // {content, isError}` — never an RPC Err — so the model reads the structured
 // feedback; a successful GenCodeChain publishes (store + panel + journal
@@ -119,12 +119,13 @@ function parsed(content: string | undefined): Record<string, unknown> {
 }
 
 describe('client tool specs', () => {
-	it('register all six, read-only, snake_case-ready', () => {
+	it('register all seven, read-only, snake_case-ready', () => {
 		const specs = clientToolSpecs();
 		expect(specs.map((s) => s.name)).toEqual([
 			'GenCodeChain',
 			'NarrateCodeChain',
 			'ExtendCodeChainNode',
+			'AddCodeChainNode',
 			'ExpandCodeChainNode',
 			'AnnotateCodeChainNode',
 			'RefreshCodeChain',
@@ -133,13 +134,16 @@ describe('client tool specs', () => {
 		// Cross-references between tools use the model-facing prefixed names
 		// (§8 Phase 0 revision): the model never sees the bare registration
 		// name, so the descriptions must not reference it either. The
-		// progressive chain-building trio (Gen → Narrate → Extend) must point
-		// at each other, and the semantics pair (Expand ↔ Annotate ↔ Extend)
-		// too.
+		// progressive chain-building path (Gen ↔ Add ↔ Extend → Narrate) must
+		// point at each other, and the semantics pair (Expand ↔ Annotate ↔
+		// Extend) too.
 		expect(specs[0]?.description).toContain('client_ExtendCodeChainNode');
 		// The seed no longer carries the story — it must send the model to the
 		// dedicated narrative tool instead.
 		expect(specs[0]?.description).toContain('client_NarrateCodeChain');
+		// The default build path is node-by-node: Gen's whole-tree seed is
+		// demoted to a large-budget shortcut and points the model at Add.
+		expect(specs[0]?.description).toContain('client_AddCodeChainNode');
 		// The seed schema dropped the top-level narrative field entirely (the
 		// word still appears inside a node `beat` description — check the shape,
 		// not the string).
@@ -148,14 +152,21 @@ describe('client tool specs', () => {
 		expect(genSchema.required ?? []).not.toContain('narrative');
 		expect(specs[1]?.description).toContain('client_GenCodeChain');
 		expect(specs[2]?.description).toContain('client_GenCodeChain');
-		expect(specs[3]?.description).toContain('client_AnnotateCodeChainNode');
+		// Add (index 3) is the default one-node-per-call path and must
+		// cross-reference the whole-tree tools it replaces + the narrator it
+		// hands off to.
+		expect(specs[3]?.description).toContain('ONE node');
+		expect(specs[3]?.description).toContain('client_GenCodeChain');
 		expect(specs[3]?.description).toContain('client_ExtendCodeChainNode');
-		expect(specs[4]?.description).toContain('client_ExpandCodeChainNode');
+		expect(specs[3]?.description).toContain('client_NarrateCodeChain');
+		expect(specs[4]?.description).toContain('client_AnnotateCodeChainNode');
 		expect(specs[4]?.description).toContain('client_ExtendCodeChainNode');
+		expect(specs[5]?.description).toContain('client_ExpandCodeChainNode');
+		expect(specs[5]?.description).toContain('client_ExtendCodeChainNode');
 		for (const spec of specs) {
 			// A bare (unprefixed) tool name would be a name the model can
 			// never call — reject it in every description.
-			expect(spec.description).not.toMatch(/(^|[^_A-Za-z])(GenCodeChain|NarrateCodeChain|ExtendCodeChainNode|ExpandCodeChainNode|AnnotateCodeChainNode|RefreshCodeChain)(?!_)/);
+			expect(spec.description).not.toMatch(/(^|[^_A-Za-z])(GenCodeChain|NarrateCodeChain|ExtendCodeChainNode|AddCodeChainNode|ExpandCodeChainNode|AnnotateCodeChainNode|RefreshCodeChain)(?!_)/);
 		}
 	});
 });
@@ -509,6 +520,193 @@ describe('ExtendCodeChainNode', () => {
 		expect(t.updated).toHaveLength(0);
 	});
 });
+
+// AddCodeChainNode is the node-by-node DEFAULT path: every call carries ONE
+// node (~300 chars), the only tool JSON a small-output-budget model can emit
+// without truncating. It seeds a new chain from a first node, appends under a
+// parentId, rejects a packed `children` array with the "one per call" recipe,
+// and reuses the shared self-correction gate keyed by session + chain + node.
+describe('AddCodeChainNode', () => {
+	const eventNode: ChainNodeDraft = {
+		id: 'event.emitted',
+		label: 'emitOrderCreated',
+		kind: 'data',
+		file: 'src/order/events.ts',
+		symbol: 'emitOrderCreated',
+		summary: '领域事件广播',
+		beat: '订单创建后广播',
+	};
+
+	it('create mode: a first node with no chainId/parentId seeds a chain (root = the node, title = label + " 代码链")', async () => {
+		const { tools, store, shown, verbs, reply } = makeTools();
+		const r = reply();
+		const handled = await tools.handle(
+			call('client_AddCodeChainNode', { node: { ...okRoot, children: undefined } }),
+			r.sinks,
+		);
+		expect(handled).toBe(true);
+		expect(r.calls[0]?.err).toBeUndefined();
+		expect(r.calls[0]?.isError).toBe(false);
+		expect(parsed(r.calls[0]?.content)).toMatchObject({
+			ok: true,
+			chainId: 'cc-1',
+			nodeId: 'handler.create',
+			nodeCount: 1,
+			unresolvedCount: 0,
+			nextHint: expect.stringContaining('client_NarrateCodeChain'),
+		});
+		const created = store.get('cc-1');
+		expect(created?.title).toBe('createOrder 代码链');
+		expect(created?.root.id).toBe('handler.create');
+		// Seed publishes like Gen: panel reveal + journal verb.
+		expect(shown).toHaveLength(1);
+		expect(verbs[0]).toMatchObject({ sessionId: 's1', chainId: 'cc-1', nodeCount: 1 });
+	});
+
+	it('append mode: a node with parentId attaches under it, recomputes stats, and pushes an update (not a reveal)', async () => {
+		const t = makeTools();
+		const g = t.reply();
+		await t.tools.handle(
+			call('client_AddCodeChainNode', { node: { ...okRoot, children: undefined } }),
+			g.sinks,
+		);
+		expect(g.calls[0]?.isError).toBe(false);
+		const r = t.reply();
+		await t.tools.handle(
+			call('AddCodeChainNode', { chainId: 'cc-1', parentId: 'handler.create', node: { ...eventNode, children: undefined } }),
+			r.sinks,
+		);
+		expect(r.calls[0]?.isError).toBe(false);
+		expect(parsed(r.calls[0]?.content)).toMatchObject({
+			ok: true,
+			chainId: 'cc-1',
+			nodeId: 'event.emitted',
+			nodeCount: 2,
+			unresolvedCount: 0,
+		});
+		const stored = t.store.get('cc-1');
+		expect(stored?.root.children[0]?.id).toBe('event.emitted');
+		// The single node's beat survives resolution.
+		expect(stored?.root.children[0]?.beat).toBe('订单创建后广播');
+		expect(stored?.stats).toEqual({ nodeCount: 2, unresolvedCount: 0 });
+		// Append rides the update sink, not a second reveal.
+		expect(t.updated).toHaveLength(1);
+		expect(t.shown).toHaveLength(1); // only the seed
+	});
+
+	it('an unknown parentId answers isError with available ids', async () => {
+		const t = makeTools();
+		const g = t.reply();
+		await t.tools.handle(call('AddCodeChainNode', { node: { ...okRoot, children: undefined } }), g.sinks);
+		const r = t.reply();
+		await t.tools.handle(
+			call('AddCodeChainNode', { chainId: 'cc-1', parentId: 'ghost.node', node: { ...eventNode, children: undefined } }),
+			r.sinks,
+		);
+		expect(r.calls[0]?.isError).toBe(true);
+		const body = parsed(r.calls[0]?.content);
+		expect(body.error).toContain('ghost.node');
+		expect(body.availableIds).toEqual(expect.arrayContaining([expect.stringContaining('handler.create')]));
+		expect((body.availableIds as string[]).length).toBeLessThanOrEqual(10);
+	});
+
+	it('a node carrying `children` answers isError and tells the model to add one node per call', async () => {
+		const t = makeTools();
+		const g = t.reply();
+		await t.tools.handle(call('AddCodeChainNode', { node: { ...okRoot, children: undefined } }), g.sinks);
+		const r = t.reply();
+		await t.tools.handle(
+			call('AddCodeChainNode', {
+				chainId: 'cc-1',
+				parentId: 'handler.create',
+				node: { ...eventNode, children: [okChildWithId('extra')] },
+			}),
+			r.sinks,
+		);
+		expect(r.calls[0]?.isError).toBe(true);
+		expect(r.calls[0]?.content).toContain('ONE node');
+		expect(r.calls[0]?.content).toContain('children');
+		// Rejected before attaching: still a one-node chain.
+		expect(t.store.get('cc-1')?.root.children).toHaveLength(0);
+	});
+
+	it('a failing symbol drives the self-correction loop, then a fixed node attaches (round 1 fail → round 2 ok)', async () => {
+		const t = makeTools();
+		const g = t.reply();
+		await t.tools.handle(call('AddCodeChainNode', { node: { ...okRoot, children: undefined } }), g.sinks);
+		const r1 = t.reply();
+		await t.tools.handle(
+			call('AddCodeChainNode', { chainId: 'cc-1', parentId: 'handler.create', node: { ...failingChild, children: undefined } }),
+			r1.sinks,
+		);
+		expect(r1.calls[0]?.isError).toBe(true);
+		const body = parsed(r1.calls[0]?.content);
+		expect(body.failures).toEqual([{ nodeId: 'ghost', reason: expect.any(String) }]);
+		// Nothing appended while correcting.
+		expect(t.updated).toHaveLength(0);
+		expect(t.store.get('cc-1')?.root.children).toHaveLength(0);
+		const r2 = t.reply();
+		await t.tools.handle(
+			call('AddCodeChainNode', { chainId: 'cc-1', parentId: 'handler.create', node: { ...eventNode, children: undefined } }),
+			r2.sinks,
+		);
+		expect(r2.calls[0]?.isError).toBe(false);
+		expect(t.store.get('cc-1')?.root.children[0]?.id).toBe('event.emitted');
+		expect(t.updated).toHaveLength(1);
+	});
+
+	it('an oversized single-node payload trips the tightened 1200-char guard with the one-per-call recipe', async () => {
+		const t = makeTools();
+		const g = t.reply();
+		await t.tools.handle(call('AddCodeChainNode', { node: { ...okRoot, children: undefined } }), g.sinks);
+		const r = t.reply();
+		await t.tools.handle(
+			call('AddCodeChainNode', { chainId: 'cc-1', parentId: 'handler.create', node: { ...eventNode, summary: 'x'.repeat(1_400), children: undefined } }),
+			r.sinks,
+		);
+		expect(r.calls[0]?.isError).toBe(true);
+		const msg = r.calls[0]?.content ?? '';
+		expect(msg).toContain('payload too large');
+		expect(msg).toMatch(/1\d{3} chars/);
+		expect(msg).toContain('1200 char limit');
+		expect(msg).toContain('ONE node');
+		expect(msg).toContain('per call');
+		// The guard rejects BEFORE resolving: no panel update.
+		expect(t.updated).toHaveLength(0);
+	});
+
+	it('an unknown chainId answers isError (does not seed)', async () => {
+		const { tools, shown, reply } = makeTools();
+		const r = reply();
+		await tools.handle(call('AddCodeChainNode', { chainId: 'ghost', node: { ...eventNode, children: undefined } }), r.sinks);
+		expect(r.calls[0]?.isError).toBe(true);
+		expect(r.calls[0]?.content).toContain('unknown chainId');
+		expect(shown).toHaveLength(0);
+	});
+
+	it('missing `node` answers isError', async () => {
+		const { tools, reply } = makeTools();
+		const r = reply();
+		await tools.handle(call('AddCodeChainNode', { chainId: 'cc-1' }), r.sinks);
+		expect(r.calls[0]?.isError).toBe(true);
+		expect(r.calls[0]?.content).toContain('node');
+	});
+
+	it('routes the prefixed `client_AddCodeChainNode` name identically (§9.2)', async () => {
+		const { tools, store, reply } = makeTools();
+		const r = reply();
+		const handled = await tools.handle(call('client_AddCodeChainNode', { node: { ...okRoot, children: undefined } }), r.sinks);
+		expect(handled).toBe(true);
+		expect(r.calls[0]?.isError).toBe(false);
+		expect(store.get('cc-1')?.root.id).toBe('handler.create');
+	});
+});
+
+// A minimal valid child node for the "children rejected" test (identity does
+// not matter — the handler rejects the payload before resolving the children).
+function okChildWithId(id: string): ChainNodeDraft {
+	return { id, label: id, kind: 'call', file: 'src/order/service.ts', symbol: 'OrderService.create', summary: '附带子节点' };
+}
 
 describe('Expand / Annotate / Refresh', () => {
 	async function genOk() {

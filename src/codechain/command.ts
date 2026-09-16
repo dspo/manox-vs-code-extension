@@ -34,14 +34,14 @@ argument-hint: <what to understand, e.g. 订单创建接口的业务逻辑>
 ---
 用户想通过「代码链」功能阅读理解代码。用户的问题：$ARGUMENTS
 
-工作流程（业务优先，渐进成链；叙事与树分两次调用，各自留足输出预算）：
+工作流程（业务优先，逐节点成链；叙事与树分开提交，各自留足输出预算。默认路径每次调用只加一个节点——小输出预算模型（如百炼上的 qwen3.8-flash，单次响应仅 ~2K tokens，thinking/text/tool JSON 共享）即使按分片协议仍会把多节点的 tool_use 写到截断，逐节点是唯一对所有模型都可行的建链方式）：
 1. 先用可用的检索/阅读工具定位业务入口（路由/handler/公开 API），先读通业务闭环——状态在哪里被改变、事件发到哪里、账在哪里记——再沿真实调用关系回填调用路径。只通读改变或承载业务状态的步骤；middleware、参数格式校验、幂等、审计日志、错误包装、DTO 转换等惯例代码不要作为节点深入（有业务例外含义的一句话写进父节点 summary 或 edgeNote）。
-2a. 调用 client_GenCodeChain 播种：只放故事主干（spine）树、不要带 narrative（树只放故事主干——业务语义不同的分支才展开，错误/回退路径最多用一个 kind='note' 节点概括；spine ≤8 个节点、整段 JSON 控制在 ~2.5KB 内；每个节点带 summary（≤120 字，用户语言讲业务上发生了什么）和 beat（≤60 字，该节点在故事里承担的一拍））。
-2b. 播种成功后立刻单独调用 client_NarrateCodeChain 提交叙事：一次只写 narrative 文本（300-600 字 markdown 连贯业务故事：触发→关键决策→状态流转→对外后果），带上 2a 返回的 chainId，切勿把它塞回播种调用。
-3. 值得深入的 spine 节点用 client_ExtendCodeChainNode 逐块补充：每块前先用读工具读该函数确认其业务含义，每块 ≤8 个新节点；本块改变故事时传更新后的完整 narrative，否则省略。
-4. 之后：真实调用边用 client_ExpandCodeChainNode（宿主经 LSP 解析），语义补注用 client_AnnotateCodeChainNode。
-5. 工具返回后，用 2-3 句话向用户概述这条链的主干（回扣 narrative 的故事线），并提示：点击树节点或按“上一步/下一步”可跟随代码阅读。
-若 client_GenCodeChain 或 client_ExtendCodeChainNode 报告符号解析失败，根据报错修正 file/symbol 后重试（最多 3 次），仍失败则将失败节点降级为 kind='note' 并在 summary 说明。若工具报告 payload too large 或节点/摘要被截断，改用更小的分片重试，禁止原样重发。
+2. 建立链骨架（默认，任意模型可行）：调用一次 client_GenCodeChain 只放链的 title、question 与单个 root 入口节点（kind='entry'）、不要带 narrative；或直接不带 chainId 与 parentId 调用一次 client_AddCodeChainNode 添加第一个入口节点来创建链（回复回带新的 chainId，后续调用复用它）。
+3. 按故事发生的顺序逐个 client_AddCodeChainNode 添加节点：每次调用只加一个节点，parentId 用上一次回复返回的 nodeId（即本步在业务叙事里跟随的那个节点；紧跟 root 的一步可省略 parentId 挂到根）；每个节点写它的业务一拍 beat（≤60 字）与 summary（≤120 字，用户语言讲业务上发生了什么），file/symbol 必须是你真正读过的符号、禁报行号，概念性且无单一代码位置的步骤用 kind='note'。一次调用绝不塞 children——一步一个节点、多次调用。
+4. 值得补充时：真实调用边用 client_ExpandCodeChainNode（宿主经 LSP 解析）、语义补注用 client_AnnotateCodeChainNode。（大输出预算模型也可用 client_GenCodeChain 一次播种整棵 ≤8 节点主干、或用 client_ExtendCodeChainNode 一次补 ≤8 个节点的整块作为捷径；小输出预算模型不要走整树/整块，坚持逐节点。）
+5. 链成型后单独调用 client_NarrateCodeChain 提交成篇叙事：一次只写 narrative 文本（300-600 字 markdown 连贯业务故事：触发→关键决策→状态流转→对外后果），带上 chainId，切勿塞回其它调用。
+6. 工具返回后，用 2-3 句话向用户概述这条链的主干（回扣 narrative 的故事线），并提示：点击树节点或按“上一步/下一步”可跟随代码阅读。
+若 client_GenCodeChain / client_AddCodeChainNode / client_ExtendCodeChainNode 报告符号解析失败，根据报错只修正失败的那个节点 file/symbol 后重试（最多 3 次），仍失败则将失败节点降级为 kind='note' 并在 summary 说明。若工具报告 payload too large 或节点/摘要被截断，改用更小的粒度（回到逐节点、每次一个）重试，禁止原样重发。
 `;
 
 /** Resolve the state root to provision, mirroring the transport's own
