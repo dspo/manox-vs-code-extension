@@ -76,6 +76,16 @@ Key invariants (from the manox architecture doc, `docs/dsh-v2-architecture.md`):
   out-of-band envelope vocabulary, never protocol — the host answers pings
   without touching the agent relay, and a healthy boot re-push also
   refetches the registries without a reload at all.
+- **The webview keeps refetching models until registration settles.** The
+  server registers model providers on a background thread (per-provider
+  keychain resolution, up to ~30 s) and marks itself ready *before* that
+  finishes, so it broadcasts an empty `models: []` on ready and only the
+  populated list once registration completes. A mount that lands in that
+  window caches the empty list and can miss the second broadcast, freezing
+  the model picker on "No models configured" — a hole the watchdog's boot
+  re-push cannot cover. A planner (`webview-ui/…/state/models-refetch.ts`)
+  re-issues `requestModels()` every 10 s until the store's model list is
+  non-empty, then stops for good (settle is sticky).
 
 ## The native binding
 
