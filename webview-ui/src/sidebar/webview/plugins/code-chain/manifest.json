@@ -1,0 +1,8 @@
+{
+  "id": "code-chain",
+  "name": "Code Chain",
+  "version": "0.1.0",
+  "description": "Session-header chip listing the code chains generated in this conversation (§7), each reopening the editor-area panel.",
+  "entry": "client.tsx",
+  "slots": ["conversation.session.header.utilities"]
+}

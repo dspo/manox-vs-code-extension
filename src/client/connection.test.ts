@@ -205,6 +205,56 @@ describe('AgentConnection over a scripted wire', () => {
 		expect(shielded).toEqual(['approve']);
 	});
 
+	// The code-chain host branch (agentHost.ts §4/§9.3): `invokeClientTool`
+	// is answered by the interceptor BEFORE any per-session shield — a
+	// viewed session's no-op handler would otherwise swallow it into the
+	// server's 300s wait, and a per-session handler would override the
+	// sidebar's approval-card answering. The reply is the `{content,
+	// isError}` Ok contract.
+	it('invokeClientTool is intercepted before the session shield and replies {content,isError}', () => {
+		const wire = new FakeWire();
+		const handled: string[] = [];
+		const conn = new AgentConnection(wire, {
+			idPrefix: 'host',
+			hostCalls: (call, _id, reply) => {
+				if (call.method === 'invokeClientTool') {
+					handled.push(call.name);
+					reply.ok({ content: JSON.stringify({ ok: true, chainId: 'cc-1' }), isError: false });
+					return true;
+				}
+				return false;
+			},
+		});
+		// A shielded (viewed) session must NOT capture the client-tool call.
+		const shielded: string[] = [];
+		conn.setCallHandler('s1', (call) => shielded.push(call.method));
+
+		wire.feed({
+			kind: 'request',
+			id: 'inv-1',
+			call: {
+				method: 'invokeClientTool',
+				deliveryId: 'd1',
+				sessionId: 's1',
+				clientId: 'vscode-1',
+				toolCallId: 'tc1',
+				name: 'GenCodeChain',
+				input: { title: 't' },
+			},
+		});
+		expect(handled).toEqual(['GenCodeChain']);
+		expect(shielded).toEqual([]); // shield never saw it
+		expect(wire.sent.at(-1)).toMatchObject({
+			kind: 'reply',
+			id: 'inv-1',
+			outcome: { Ok: { content: JSON.stringify({ ok: true, chainId: 'cc-1' }), isError: false } },
+		});
+
+		// A failed tool round-trips as Ok { content, isError:true } (never an
+		// RPC Err), so the model reads the self-correction text.
+		conn.setCallHandler('s1', null);
+	});
+
 	it('observe policy never auto-answers (the webview consumer)', () => {
 		const wire = new FakeWire();
 		const conn = new AgentConnection(wire, { idPrefix: 'web', unroutedCalls: 'observe' });

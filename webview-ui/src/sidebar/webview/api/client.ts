@@ -35,7 +35,7 @@ import type {
 	PlanVerdictChoice,
 	ReasoningEffort,
 } from '../../../protocol';
-import type { ToWebview } from '../../messages';
+import type { HostNote, ToWebview } from '../../messages';
 import { getBootFacts } from './host-facts';
 import type { Bridge } from './bridge';
 import { createVscodeBridge, isVscodeHost } from './vscode-bridge';
@@ -48,16 +48,19 @@ import type { JournalPageData, StoreEffects } from '../state/store';
 const bridge: Bridge = isVscodeHost() ? createVscodeBridge() : createWebBridge();
 
 const navigatorListeners = new Set<() => void>();
+const composeListeners = new Set<(text: string, sessionId: string) => void>();
 
 /** The store surface the api layer drives (structurally typed so tests can
  * inject fakes). `reseat` restarts every engine + re-follows streams;
- * `confirmDraft` rekeys a client-minted draft id to the server's. */
+ * `confirmDraft` rekeys a client-minted draft id to the server's;
+ * `addCodeChain` parks a freshly generated chain's journal card (§7). */
 interface StoreSink {
 	dispatch(msg: FromServer): void;
 	openRemote(sessionId: string): void;
 	confirmDraft(localId: string, serverId: string): void;
 	reseat(): void;
 	attachEffects(effects: StoreEffects): void;
+	addCodeChain(sessionId: string, card: { chainId: string; title: string; nodeCount: number }): void;
 }
 let storeSink: StoreSink | null = null;
 
@@ -101,6 +104,27 @@ bridge.onMessage((message: ToWebview) => {
 		void api.newSession({});
 		return;
 	}
+	if ('kind' in message && (message as { kind: string }).kind === 'code_chain') {
+		// GenCodeChain succeeded out-of-band (§7): park its journal card on
+		// the owning session. The note carries the identity the panel reopen
+		// needs; the chain DATA lives host-side (workspaceState), never here.
+		const note = message as Extract<HostNote, { kind: 'code_chain' }>;
+		storeSink?.addCodeChain(note.sessionId, {
+			chainId: note.chainId,
+			title: note.title,
+			nodeCount: note.nodeCount,
+		});
+		return;
+	}
+	if ('kind' in message && (message as { kind: string }).kind === 'compose') {
+		// Panel "Regenerate" (§10): the host focuses the sidebar and posts
+		// the prefill; the live composer consumes it. The note carries its
+		// owning session and the consumer checks it against the active
+		// thread, so a regen never lands in the wrong composer (review #16).
+		const note = message as Extract<HostNote, { kind: 'compose' }>;
+		for (const listener of composeListeners) listener(note.text, note.sessionId);
+		return;
+	}
 	const frame = message as FromServer;
 	// Resolve the pending-request table for `Response` frames (§T7.1).
 	if (frame.kind === 'response') {
@@ -131,6 +155,13 @@ bridge.onConnection?.(
 export function onOpenTurnNavigator(listener: () => void): () => void {
 	navigatorListeners.add(listener);
 	return () => navigatorListeners.delete(listener);
+}
+
+/** Subscribe to host-requested composer prefills (the panel's Regenerate /
+ * "从该节点重新生成" backfill, §6.3/§10). The live composer consumes them. */
+export function onComposePrefill(listener: (text: string, sessionId: string) => void): () => void {
+	composeListeners.add(listener);
+	return () => composeListeners.delete(listener);
 }
 
 /** Wire the store: install the transport effects seam (the api layer owns
@@ -178,7 +209,7 @@ const nextId = (): MsgId => `webui-${Date.now().toString(36)}-${++msgSeq}`;
 /** A fresh id to correlate an optimistic echo with its durable origin (§F.2). */
 export const mintRpcId = (): string => globalThis.crypto.randomUUID();
 
-function post(msg: FromClient): void {
+function post(msg: FromClient | { t: 'openCodeChain'; chainId: string }): void {
 	bridge.post(msg);
 }
 
@@ -389,6 +420,13 @@ export const api = {
 		// Switch the view optimistically (the store's follow stream confirms
 		// it); the `OpenSession` receipt is just ownership (§D.2).
 		storeSink?.openRemote(sessionId);
+	},
+	/** Reopen a stored chain in the editor-area panel (§7): a code-chain
+	 * card / header-chip click. The chain DATA lives host-side
+	 * (workspaceState), so this is an out-of-band `openCodeChain` ask, not a
+	 * protocol frame. */
+	openCodeChain(chainId: string): void {
+		post({ t: 'openCodeChain', chainId });
 	},
 	// GW5: the former `blurThread()` posted a `focusThread` note — the
 	// server-side focus mirror is retired. The blur is local state:

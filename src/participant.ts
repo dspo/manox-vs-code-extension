@@ -9,6 +9,7 @@
 
 import * as vscode from 'vscode';
 import { AgentHost, configuredApprovalMode, resolveWorkspaceCwd } from './agentHost';
+import { codeChainRegisterSession, ensureCodeChain } from './codechain/registration';
 import { errorText } from './util';
 import type { SessionHandle } from './client/connection';
 import type { MsgId, ServerCall } from './protocol/types';
@@ -49,10 +50,15 @@ async function runParticipantTurn(
 	let sessionId = '';
 	try {
 		await host.connection.ready;
+		// Client-tool registration rides the code-chain service (§9.2):
+		// install it against this host, then register the fresh session
+		// before submit so the first turn already assembles the tools.
+		ensureCodeChain(context, host);
 		sessionId = await host.connection.createSession({
 			cwd: resolveWorkspaceCwd(),
 			approvalMode: configuredApprovalMode(),
 		});
+		codeChainRegisterSession(sessionId);
 	} catch (e) {
 		stream.markdown(`**Error:** manox core unavailable (${errorText(e)})`);
 		return { errorDetails: { message: 'core unavailable' } };

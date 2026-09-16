@@ -48,6 +48,7 @@ function fakeStore() {
 		openRemote: vi.fn(),
 		confirmDraft: vi.fn(),
 		reseat: vi.fn(),
+		addCodeChain: vi.fn(),
 		attachEffects: vi.fn((e: StoreEffects) => {
 			effects = e;
 		}),

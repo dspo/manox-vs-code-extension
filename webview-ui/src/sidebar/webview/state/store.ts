@@ -255,7 +255,8 @@ const modelRefOf = (value: unknown): string | null => {
 type TransientCard =
 	| { kind: 'approval'; id: string; callId: string; toolName: string; summary: string; input?: unknown }
 	| { kind: 'ask_question'; id: string; callId: string; summary: string; input: unknown; answered?: boolean }
-	| { kind: 'plan_review'; id: string; callId: string; planFile: string; title: string; content: string };
+	| { kind: 'plan_review'; id: string; callId: string; planFile: string; title: string; content: string }
+	| { kind: 'code_chain'; id: string; chainId: string; title: string; nodeCount: number };
 
 /** The per-session runtime: engine + fold + row cache + projection slots +
  * client-owned echoes. Lives outside the observable state; `items` / typed
@@ -459,6 +460,25 @@ export class Store {
 		if (runtime) {
 			runtime.cards = runtime.cards.filter((c) => c.kind !== 'plan_review');
 		}
+		this.publishThread(sessionId);
+	}
+
+	/** Park the journal card for a freshly generated chain (§7). Keyed by
+	 * chainId so a replayed host note (or a regenerate that reuses the id)
+	 * replaces — never stacks — the card. Like the other transient cards it
+	 * lives beside the fold window, not inside it: the durable journal
+	 * stream has no code-chain event vocabulary (the chain is host state),
+	 * and a rebuilt window must not silently drop a reopenable tour. */
+	addCodeChain(
+		sessionId: string,
+		card: { chainId: string; title: string; nodeCount: number },
+	): void {
+		const runtime = this.ensureRuntime(sessionId);
+		const id = `code-chain-${card.chainId}`;
+		runtime.cards = [
+			...runtime.cards.filter((c) => c.id !== id),
+			{ kind: 'code_chain' as const, id, chainId: card.chainId, title: card.title, nodeCount: card.nodeCount },
+		];
 		this.publishThread(sessionId);
 	}
 

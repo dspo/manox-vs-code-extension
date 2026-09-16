@@ -1,0 +1,201 @@
+{
+  "_comment": "Shared GenCodeChain fixtures: a resolved CodeChain (the panel + tour + chainStore fold) and a draft tree with a FakeLspClient symbol map (the resolve engine). Consumed by src/codechain/{tour,chainStore,resolve}.test.ts and webview-ui/src/codechain/app.test.tsx. Mirrors the journal-cases.json discipline: one source, cross-layer.",
+  "chain": {
+    "chainId": "cc-order-create",
+    "sessionId": "s1",
+    "title": "订单创建流程",
+    "question": "订单创建接口的业务逻辑",
+    "createdAt": 1727000000000,
+    "root": {
+      "id": "handler.create",
+      "label": "createOrder",
+      "kind": "entry",
+      "summary": "HTTP 入口：接收下单请求",
+      "provenance": "llm",
+      "location": {
+        "uri": "file:///repo/src/order/handler.ts",
+        "file": "src/order/handler.ts",
+        "symbolPath": ["OrderController", "createOrder"],
+        "range": { "startLine": 9, "startCharacter": 2, "endLine": 18, "endCharacter": 3 },
+        "resolveStatus": "ok"
+      },
+      "children": [
+        {
+          "id": "service.create",
+          "label": "create",
+          "kind": "call",
+          "summary": "创建订单前先校验库存与风控",
+          "edgeNote": "入口调用服务层",
+          "provenance": "llm",
+          "location": {
+            "uri": "file:///repo/src/order/service.ts",
+            "file": "src/order/service.ts",
+            "symbolPath": ["OrderService", "create"],
+            "range": { "startLine": 41, "startCharacter": 2, "endLine": 60, "endCharacter": 3 },
+            "resolveStatus": "ok"
+          },
+          "children": [
+            {
+              "id": "stock.validate",
+              "label": "validateStock",
+              "kind": "impl",
+              "summary": "库存校验，不足抛异常",
+              "edgeNote": "先校验再扣减",
+              "provenance": "callHierarchy",
+              "location": {
+                "uri": "file:///repo/src/order/service.ts",
+                "file": "src/order/service.ts",
+                "range": { "startLine": 62, "startCharacter": 2, "endLine": 70, "endCharacter": 3 },
+                "resolveStatus": "ok"
+              },
+              "children": []
+            },
+            {
+              "id": "stock.deduct",
+              "label": "deductInventory",
+              "kind": "impl",
+              "summary": "扣减库存",
+              "provenance": "llm",
+              "location": {
+                "uri": "file:///repo/src/order/service.ts",
+                "symbolPath": ["InventoryService", "deduct"],
+                "resolveStatus": "ambiguous",
+                "candidates": [
+                  { "uri": "file:///repo/src/order/service.ts", "range": { "startLine": 80, "startCharacter": 2, "endLine": 84, "endCharacter": 3 }, "label": "A.deduct" },
+                  { "uri": "file:///repo/src/stock/service.ts", "range": { "startLine": 10, "startCharacter": 2, "endLine": 14, "endCharacter": 3 }, "label": "B.deduct" }
+                ]
+              },
+              "children": []
+            }
+          ]
+        },
+        {
+          "id": "note.txn",
+          "label": "事务边界",
+          "kind": "note",
+          "summary": "整段处于同一数据库事务，失败回滚",
+          "provenance": "llm",
+          "location": { "uri": "", "resolveStatus": "ok" },
+          "children": []
+        },
+        {
+          "id": "event.emitted",
+          "label": "emitOrderCreated",
+          "kind": "data",
+          "summary": "领域事件发布",
+          "edgeNote": "落库成功后对外广播",
+          "provenance": "llm",
+          "location": {
+            "uri": "file:///repo/src/order/events.ts",
+            "file": "src/order/events.ts",
+            "symbolPath": ["emitOrderCreated"],
+            "range": { "startLine": 5, "startCharacter": 2, "endLine": 12, "endCharacter": 3 },
+            "resolveStatus": "ok"
+          },
+          "children": []
+        },
+        {
+          "id": "broken.hallucinated",
+          "label": "phantomHelper",
+          "kind": "call",
+          "summary": "模型幻觉的符号，宿主拒绝",
+          "provenance": "llm",
+          "location": { "uri": "", "resolveStatus": "unresolved" },
+          "children": []
+        }
+      ]
+    },
+    "stats": { "nodeCount": 7, "unresolvedCount": 1 }
+  },
+  "resolve": {
+    "workspaceFolders": ["/repo"],
+    "existingFiles": ["src/order/handler.ts", "src/order/service.ts", "src/order/events.ts"],
+    "symbols": {
+      "file:///repo/src/order/handler.ts": [
+        {
+          "name": "OrderController",
+          "range": { "startLine": 0, "startCharacter": 0, "endLine": 30, "endCharacter": 1 },
+          "selectionRange": { "startLine": 0, "startCharacter": 6, "endLine": 0, "endCharacter": 21 },
+          "children": [
+            {
+              "name": "createOrder",
+              "range": { "startLine": 9, "startCharacter": 2, "endLine": 18, "endCharacter": 3 },
+              "selectionRange": { "startLine": 9, "startCharacter": 2, "endLine": 9, "endCharacter": 13 },
+              "children": []
+            }
+          ]
+        }
+      ],
+      "file:///repo/src/order/service.ts": [
+        {
+          "name": "OrderService",
+          "range": { "startLine": 0, "startCharacter": 0, "endLine": 90, "endCharacter": 1 },
+          "selectionRange": { "startLine": 0, "startCharacter": 6, "endLine": 0, "endCharacter": 18 },
+          "children": [
+            {
+              "name": "create",
+              "range": { "startLine": 41, "startCharacter": 2, "endLine": 60, "endCharacter": 3 },
+              "selectionRange": { "startLine": 41, "startCharacter": 2, "endLine": 41, "endCharacter": 8 },
+              "children": []
+            }
+          ]
+        },
+        {
+          "name": "InventoryService",
+          "range": { "startLine": 0, "startCharacter": 0, "endLine": 90, "endCharacter": 1 },
+          "selectionRange": { "startLine": 20, "startCharacter": 6, "endLine": 20, "endCharacter": 22 },
+          "children": [
+            {
+              "name": "deduct",
+              "range": { "startLine": 80, "startCharacter": 2, "endLine": 84, "endCharacter": 3 },
+              "selectionRange": { "startLine": 80, "startCharacter": 2, "endLine": 80, "endCharacter": 8 },
+              "children": []
+            }
+          ]
+        },
+        {
+          "name": "WarehouseService",
+          "range": { "startLine": 0, "startCharacter": 0, "endLine": 90, "endCharacter": 1 },
+          "selectionRange": { "startLine": 25, "startCharacter": 6, "endLine": 25, "endCharacter": 22 },
+          "children": [
+            {
+              "name": "deduct",
+              "range": { "startLine": 86, "startCharacter": 2, "endLine": 89, "endCharacter": 3 },
+              "selectionRange": { "startLine": 86, "startCharacter": 2, "endLine": 86, "endCharacter": 8 },
+              "children": []
+            }
+          ]
+        }
+      ],
+      "file:///repo/src/order/events.ts": [
+        {
+          "name": "emitOrderCreated",
+          "range": { "startLine": 5, "startCharacter": 2, "endLine": 12, "endCharacter": 3 },
+          "selectionRange": { "startLine": 5, "startCharacter": 2, "endLine": 5, "endCharacter": 18 },
+          "children": []
+        }
+      ]
+    },
+    "cases": [
+      { "name": "unique path match", "draft": { "id": "a", "label": "createOrder", "kind": "entry", "file": "src/order/handler.ts", "symbol": "OrderController.createOrder", "summary": "入口" }, "status": "ok" },
+      { "name": "fuzzy single-segment", "draft": { "id": "b", "label": "create", "kind": "call", "file": "src/order/service.ts", "symbol": "create", "summary": "服务" }, "status": "ok" },
+      { "name": "ambiguous same-name", "draft": { "id": "f", "label": "deduct", "kind": "call", "file": "src/order/service.ts", "symbol": "deduct", "summary": "扣减" }, "status": "ambiguous" },
+      { "name": "unresolved symbol", "draft": { "id": "c", "label": "phantom", "kind": "call", "file": "src/order/handler.ts", "symbol": "doesNotExist", "summary": "幻觉" }, "status": "unresolved" },
+      { "name": "note without symbol", "draft": { "id": "d", "label": "事务边界", "kind": "note", "file": "src/order/service.ts", "summary": "回滚" }, "status": "ok" },
+      { "name": "file outside workspace (absolute)", "draft": { "id": "e", "label": "x", "kind": "call", "file": "/etc/passwd", "symbol": "y", "summary": "越界" }, "status": "unresolved" },
+      { "name": "relative path escape (../)", "draft": { "id": "g", "label": "conf", "kind": "config", "file": "../outside/settings.json", "symbol": "Settings", "summary": "逃逸" }, "status": "unresolved" },
+      { "name": "workspace-symbol fallback (cross-file unique)", "draft": { "id": "h", "label": "PaymentGateway", "kind": "interface", "file": "src/order/handler.ts", "symbol": "PaymentGateway", "summary": "跨文件" }, "status": "ok", "resolvedUri": "file:///repo/src/pay/gateway.ts" },
+      { "name": "text fallback is WEAK (ambiguous, never ok)", "draft": { "id": "i", "label": "legacyFlag", "kind": "call", "file": "src/order/service.ts", "symbol": "legacyFlag", "summary": "仅文本出现" }, "status": "ambiguous", "weak": true }
+    ],
+    "workspaceSymbols": {
+      "PaymentGateway": [ { "uri": "file:///repo/src/pay/gateway.ts", "name": "PaymentGateway", "range": { "startLine": 3, "startCharacter": 1, "endLine": 12, "endCharacter": 2 }, "selectionRange": { "startLine": 3, "startCharacter": 17, "endLine": 3, "endCharacter": 31 } } ]
+    },
+    "fileText": {
+      "file:///repo/src/order/service.ts": "export class OrderService {\n  const legacyFlag = false; // legacyFlag kept for rollout\n}\n"
+    }
+  },
+  "tour": {
+    "order": ["handler.create", "service.create", "stock.validate", "stock.deduct", "event.emitted"],
+    "skipped": ["broken.hallucinated", "note.txn"]
+  }
+}

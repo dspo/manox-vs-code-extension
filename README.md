@@ -26,7 +26,7 @@ standalone extension's protocol layer — vendored under `webview-ui/`.
                 │ FromClient/FromServer JSON  (in-process, unbounded)
         ┌───────▼────────┐
         │ manox-napi     │  AgentServer on its own tokio runtime
-        │ (dspo/manox)   │  capabilities: approve · askUserQuestion · planVerdict
+        │ (dspo/manox)   │  capabilities: approve · askUserQuestion · planVerdict · clientTool
         └────────────────┘
 
 ┌─ Webview (webview-ui/, React 19 + Tailwind; → dist/webview/bundle.*)┐
@@ -103,6 +103,11 @@ npm test           # vitest: host suites + webview-ui suites (journal vectors, s
 code .             # then F5 ("Run manox extension")
 ```
 
+`compile` + `test` for both projects run in CI on every PR and on `main`
+pushes (`.github/workflows/ci.yml`, alongside the no-coauthor gate). The
+live-runtime smoke test stays env-gated (`MANOX_SMOKE=1` + a staged
+`manox_napi.node`) and does not run in CI.
+
 Package:
 
 ```sh
@@ -115,10 +120,14 @@ code --install-extension manox-vscode-*.vsix --force
 | Setting | Default | Meaning |
 |---|---|---|
 | `manox.sdkRoot` | *(unset)* | Directory containing `manox_napi.node`. |
-| `manox.stateRoot` | `~/.manox-vscode` | `MANOX_HOME` for the embedded runtime. Must not be the desktop app's `~/.manox` (exclusive runtime lock; contention terminates the extension host). |
+| `manox.stateRoot` | `~/.manox-vscode` | `MANOX_HOME` for the embedded runtime. Must not be the desktop app's `~/.manox` (exclusive runtime lock; contention terminates the extension host). An externally preset `MANOX_HOME` env var wins over this setting — the `/codechain` command provisions into the env root to match. |
 | `manox.approvalMode` | `workspace-write` | Tool-authorization policy seeded into new sessions (`read-only` / `workspace-write` / `danger-full-access`). |
 
-Commands: `manox: Focus Chat`, `manox: New Session`. The sidebar header also
+Commands: `manox: Focus Chat`, `manox: New Session`, `manox: Open Code
+Chain` (tour steps are `alt+left`/`alt+right` scoped to
+`activeWebviewPanelId == manox.codeChain`, so they never steal the
+workbench back/forward nav).
+The sidebar header also
 carries model / reasoning-effort / approval-mode selectors; thread rows
 pin/archive; approval, plan-verdict and question cards render inline.
 
@@ -135,7 +144,10 @@ lock-step with the Rust `manox-protocol` crate (protocol epoch 6):
 - `src/protocol/guards.test.ts` pins the exact JSON key shapes the Rust serde
   tests assert (envelope `kind` tags, camelCase payload fields, externally
   tagged `Ok`/`Err` outcomes, flattened snapshot records). A drift here means
-  this host can no longer talk to the current epoch.
+  this host can no longer talk to the current epoch. One deliberate exception
+  to camelCase: `ClientToolSpec` mirrors a Rust struct with no `rename_all`,
+  so its keys are snake_case (`input_schema`/`read_only`) — `builders.ts`'s
+  `clientToolSpec` is the single conversion face and the guards test locks it.
 - Unknown vocabulary drops + logs on both sides (L12); the closed Rust enum
   rejects unknown `kind`/`method` tags in `sendCommand` — never fatal in TS.
 
@@ -170,8 +182,21 @@ lock-step with the Rust `manox-protocol` crate (protocol epoch 6):
   reads (text-only, via `vscode.env.clipboard`) and external opens (via
   `vscode.env.openExternal`; the agent's Open tool is approval-gated
   upstream) before any per-session routing, so they never surface as
-  webview cards. `clientTool` is declared but inert until the host
-  registers tools (`registerSessionTools`).
+  webview cards. `clientTool` is now live: the host registers the
+  GenCodeChain tool set (`registerSessionTools`) and answers
+  `invokeClientTool` from the interceptor (see below).
+- GenCodeChain (`src/codechain/`): the LLM generates an LSP-verified
+  code-reading tour rendered in an editor-area webview panel. Four
+  client tools (`GenCodeChain` / `ExpandCodeChainNode` /
+  `AnnotateCodeChainNode` / `RefreshCodeChain`, all `read_only`) drive
+  it; symbol positions resolve through the `vscode.execute*Provider`
+  commands, so a hallucinated location is rejected back to the model.
+  `/codechain` is a harness slash command provisioned into
+  `<MANOX_HOME>/commands/codechain.md` at activation. The full invoke
+  round-trip depends on the dspo/manox side (the napi ClientTool
+  capability + read_only approval-gate fix); until that lands and the
+  addon is restaged, registration succeeds but real tool calls fail
+  closed — the offline suites cover the wire contract.
 - The old extension's `languageModelChatProviders` integration (exposing
   manox providers as VS Code language models via `modelChat`) was cut with
   the revival — it depended on proposed chat-provider APIs; revisit once

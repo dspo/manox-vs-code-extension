@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import rehypeSanitize from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
 
-import { cn } from '../../lib/utils';
+import { cn } from '../sidebar/webview/lib/utils';
 
 export interface MarkdownContentProps {
   content: string;
