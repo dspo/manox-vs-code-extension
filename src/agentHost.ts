@@ -42,8 +42,10 @@ export function configuredApprovalMode(): ApprovalMode {
 	return value === 'read-only' || value === 'danger-full-access' ? value : 'workspace-write';
 }
 
-/** The configured state root (`MANOX_HOME`); empty uses the dedicated
- * `~/.manox-vscode` default — never the desktop app's `~/.manox`. */
+/** The configured state root (`MANOX_HOME`); empty uses the shared
+ * `~/.manox` default — the desktop app's home, so threads/models/provider
+ * config are one surface. Concurrent instances are safe (the gateway lease
+ * is the only flock, and contention is a no-op). */
 export function configuredStateRoot(): string {
 	const value = vscode.workspace.getConfiguration('manox').get<string>('stateRoot');
 	return value && value.trim() !== '' ? value : DEFAULT_STATE_ROOT;

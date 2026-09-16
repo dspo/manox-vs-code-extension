@@ -8,10 +8,12 @@
 // `script/build-napi` in the dspo/manox repository and located through
 // `manox.sdkRoot` / `VSCODE_AGENT_HOST_MANOX_SDK_ROOT` / `<extension>/native/`.
 //
-// State-root isolation: manox holds an exclusive process lock on
-// `<MANOX_HOME>/runtime.lock` and *exits the process* on contention, so this
-// loader pins `MANOX_HOME` to a dedicated root (default `~/.manox-vscode`)
-// before the addon loads — never the desktop app's `~/.manox`.
+// State root: shared with the desktop app by default (`~/.manox`) so both
+// surfaces see the same threads, models and provider config. Concurrent
+// instances are safe — the old exclusive `runtime.lock` is gone; the only
+// remaining flock is the WS gateway lease (`gateway.lock`), whose
+// contention is a loud no-op (second gateway simply does not start), never
+// a process exit.
 
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
@@ -27,8 +29,10 @@ interface NapiBinding {
 	shutdown(): void;
 }
 
-/** Default state root when `manox.stateRoot` is unset. */
-export const DEFAULT_STATE_ROOT = path.join(os.homedir(), '.manox-vscode');
+/** Default state root when `manox.stateRoot` is unset: the desktop app's
+ * home, so threads/models/provider config are shared (see the exclusivity
+ * note above). */
+export const DEFAULT_STATE_ROOT = path.join(os.homedir(), '.manox');
 
 /**
  * Resolve the native binding's directory: the `manox.sdkRoot` setting, then
