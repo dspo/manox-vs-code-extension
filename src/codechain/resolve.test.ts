@@ -166,6 +166,45 @@ describe('resolveSymbol pipeline (fixture cases)', () => {
 		expect(resolved.location.candidates?.length).toBeGreaterThan(1);
 	});
 
+	// Review round-3: `subtypeHints` used to fold a rejected hierarchy probe
+	// into `[]` with no trace — the same silence that masked the round-2
+	// critical. Hints stay best-effort, but the failure must reach deps.log.
+	it('a failing subtypes probe leaves a log trace and no candidates (review round-3)', async () => {
+		class ThrowingSubtypesLsp extends FakeLsp {
+			override async prepareTypeHierarchy(): Promise<LspItem[]> {
+				return [
+					{
+						name: 'InventoryService',
+						uri: 'file:///repo/src/order/service.ts',
+						range: { startLine: 0, startCharacter: 0, endLine: 90, endCharacter: 1 },
+						selectionRange: { startLine: 0, startCharacter: 0, endLine: 0, endCharacter: 16 },
+					},
+				];
+			}
+			override async subtypes(): Promise<LspItem[]> {
+				throw new Error('provideSubtypes exploded');
+			}
+		}
+		const logged: string[] = [];
+		const { chain } = await resolveChain({ ...deps(new ThrowingSubtypesLsp()), log: (m) => logged.push(m) }, {
+			sessionId: 's1',
+			title: 't',
+			question: 'q',
+			root: {
+				id: 'inv',
+				label: 'InventoryService',
+				kind: 'interface',
+				file: 'src/order/service.ts',
+				symbol: 'InventoryService',
+				summary: '库存接口',
+			},
+		});
+		// The node itself stays usable; only the hint list is lost.
+		expect(chain.root.location.resolveStatus).toBe('ok');
+		expect(chain.root.location.candidates).toBeUndefined();
+		expect(logged.some((m) => m.includes('provideSubtypes exploded'))).toBe(true);
+	});
+
 	it('an unresolved draft fails the whole-chain gate with a reason (§4)', async () => {
 		const { chain, failures } = await resolveChain(deps(new FakeLsp()), {
 			sessionId: 's1',

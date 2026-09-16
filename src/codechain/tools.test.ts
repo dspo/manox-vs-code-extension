@@ -268,6 +268,41 @@ describe('Expand / Annotate / Refresh', () => {
 		expect(t.updated).toHaveLength(0);
 	});
 
+	// Review round-3: the non-ok → non-ok refresh branch compared
+	// `hit.location !== node.location` by reference — always true for the
+	// fresh objects `resolveSymbol` mints — so any chain carrying an
+	// ambiguous/unresolved node rebuilt and re-pushed on every refresh.
+	it('a no-op refresh re-pushes nothing on an ambiguous chain (review round-3)', async () => {
+		const t = makeTools();
+		const r = t.reply();
+		await t.tools.handle(
+			call('GenCodeChain', {
+				title: 't',
+				question: 'q',
+				root: {
+					id: 'inv.deduct',
+					label: 'deduct',
+					kind: 'call',
+					file: 'src/order/service.ts',
+					// Two fixture symbols share the bare name → ambiguous.
+					symbol: 'deduct',
+					summary: '库存扣减',
+				},
+			}),
+			r.sinks,
+		);
+		expect(r.calls[0]?.isError).toBe(false);
+		const stored = t.store.get('cc-1')?.root;
+		expect(stored?.location.resolveStatus).toBe('ambiguous');
+		expect(stored?.location.candidates?.length).toBeGreaterThan(1);
+
+		const rr = t.reply();
+		await t.tools.handle(call('RefreshCodeChain', { chainId: 'cc-1' }), rr.sinks);
+		expect(rr.calls[0]?.isError).toBe(false);
+		expect(parsed(rr.calls[0]?.content)).toMatchObject({ moved: [], stale: [], fixed: [] });
+		expect(t.updated).toHaveLength(0);
+	});
+
 	it('an unknown tool name is not handled (caller fail-closes)', async () => {
 		const { tools, reply } = makeTools();
 		const handled = await tools.handle(call('SomeOtherTool', {}), reply().sinks);

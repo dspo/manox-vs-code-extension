@@ -20,6 +20,9 @@ import { errorText } from '../util';
 import type { ChainStore } from './chainStore';
 import { replaceNode, withStats } from './chainStore';
 import type {
+	ChainCandidate,
+	ChainLocation,
+	ChainRange,
 	CodeChain,
 	ChainNodeDraft,
 	ResolvedNode,
@@ -431,8 +434,13 @@ export class CodeChainTools {
 				fixed.push(node.id);
 				return { ...node, children, location: { ...hit.location, file: node.location.file } };
 			}
-			return childrenChanged || hit.location !== node.location
-				? { ...node, children, location: hit.location }
+			// Non-ok → non-ok (ambiguous/unresolved/stale): rebuild only when
+			// the re-resolved location actually differs by value — every pass
+			// mints fresh objects, so reference comparison is always "changed"
+			// and a no-op refresh would re-push ambiguous/unresolved chains
+			// (review round-3).
+			return childrenChanged || !locationEqual(hit.location, node.location)
+				? { ...node, children, location: { ...hit.location, file: node.location.file } }
 				: node;
 		};
 		const root = await reroll(chain.root);
@@ -543,6 +551,42 @@ export function findNode(root: ResolvedNode, id: string): ResolvedNode | null {
 export function* flatten(root: ResolvedNode): Generator<ResolvedNode> {
 	yield root;
 	for (const child of root.children) yield* flatten(child);
+}
+
+/** Value equality for re-resolved locations: `resolveSymbol` mints a fresh
+ * object every pass, so `!==` is always true and a no-op refresh on a chain
+ * with ambiguous/unresolved nodes would rebuild + re-push the whole tree
+ * (review round-3). `file` is display-only and re-attached from the old node,
+ * so it is excluded here. */
+function locationEqual(a: ChainLocation, b: ChainLocation): boolean {
+	return (
+		a.uri === b.uri &&
+		a.resolveStatus === b.resolveStatus &&
+		rangeEqual(a.range, b.range) &&
+		rangeEqual(a.selectionRange, b.selectionRange) &&
+		candidatesEqual(a.candidates, b.candidates)
+	);
+}
+
+function rangeEqual(a: ChainRange | undefined, b: ChainRange | undefined): boolean {
+	if (!a || !b) return a === b;
+	return (
+		a.startLine === b.startLine &&
+		a.startCharacter === b.startCharacter &&
+		a.endLine === b.endLine &&
+		a.endCharacter === b.endCharacter
+	);
+}
+
+function candidatesEqual(a: ChainCandidate[] | undefined, b: ChainCandidate[] | undefined): boolean {
+	if (!a || !b) return a === b;
+	return (
+		a.length === b.length &&
+		a.every((c, i) => {
+			const other = b[i];
+			return !!other && c.uri === other.uri && c.label === other.label && rangeEqual(c.range, other.range);
+		})
+	);
 }
 
 /** Last path segment for compact reply payloads. */

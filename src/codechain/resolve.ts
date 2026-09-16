@@ -126,6 +126,10 @@ export interface ResolveDeps {
 	/** Stable id mint for chains. */
 	mintChainId(): string;
 	now(): number;
+	/** Host log channel for tolerated-failure probes that must still leave a
+	 * trace (review round-3: a silent `.catch(() => [])` once masked a dead
+	 * hierarchy path). */
+	log?(message: string): void;
 }
 
 /** Per-`uri` cap on concurrent provider calls (documentSymbols is memoized
@@ -585,7 +589,7 @@ export async function resolveChain(
 				// §5: an interface node piggybacks one subtypes query so the
 				// panel can offer the implementations as expansion seeds.
 				if (node.kind === 'interface' && location.resolveStatus === 'ok') {
-					const impls = await subtypeHints(deps.lsp, location);
+					const impls = await subtypeHints(deps.lsp, location, deps.log);
 					if (impls.length > 0) location = { ...location, candidates: impls };
 				}
 			}
@@ -627,15 +631,28 @@ function countNodes(node: ResolvedNode): number {
 	return n;
 }
 
-async function subtypeHints(lsp: LspClient, location: ChainLocation): Promise<ChainCandidate[]> {
+async function subtypeHints(
+	lsp: LspClient,
+	location: ChainLocation,
+	log?: (message: string) => void,
+): Promise<ChainCandidate[]> {
 	const anchor = anchorPosition(location);
 	if (!anchor) return [];
+	// Best-effort hints (the interface node itself stays `ok`), but a failure
+	// must leave a trace: silently answering `[]` is exactly how the round-2
+	// critical (dead hierarchy path) stayed invisible (review round-3).
 	const items = await lsp
 		.prepareTypeHierarchy(location.uri, anchor)
-		.catch(() => [] as LspItem[]);
+		.catch((e: unknown) => {
+			log?.(`type hierarchy prepare failed for ${location.uri}: ${errorText(e)}`);
+			return [] as LspItem[];
+		});
 	const first = items[0];
 	if (!first) return [];
-	const subtypes = await lsp.subtypes(first).catch(() => [] as LspItem[]);
+	const subtypes = await lsp.subtypes(first).catch((e: unknown) => {
+		log?.(`subtypes lookup failed for ${location.uri}: ${errorText(e)}`);
+		return [] as LspItem[];
+	});
 	return subtypes.map((s) => ({ uri: s.uri, range: s.range, label: s.name }));
 }
 

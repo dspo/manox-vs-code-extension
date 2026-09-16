@@ -72,10 +72,11 @@ export function ensureCodeChain(context: ExtensionContext, host: AgentHost): voi
 
 	const store = new ChainStore(toSink(context.workspaceState), log);
 	const deps: ResolveDeps = {
-		lsp: new VscodeLspClient(),
+		lsp: new VscodeLspClient(log),
 		workspace: vscodeWorkspaceView(),
 		mintChainId: () => `cc-${randomUUID()}`,
 		now: () => Date.now(),
+		log,
 	};
 	const navigation = new ChainNavigation(log);
 

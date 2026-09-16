@@ -83,7 +83,11 @@ async function provider<T>(command: string, onStall: T, ...args: unknown[]): Pro
  * provider crash — is logged and rethrown, so the tool reports a real failure
  * instead of the false "no new edges at this level" (review round-2,
  * critical). */
-async function hierarchyProvider<T>(command: string, ...args: unknown[]): Promise<T[]> {
+async function hierarchyProvider<T>(
+	log: (message: string) => void,
+	command: string,
+	...args: unknown[]
+): Promise<T[]> {
 	const call = Promise.resolve(vscode.commands.executeCommand<T[]>(command, ...args));
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const stall = new Promise<never>((_, reject) => {
@@ -92,7 +96,8 @@ async function hierarchyProvider<T>(command: string, ...args: unknown[]): Promis
 	try {
 		return (await Promise.race([call, stall])) ?? [];
 	} catch (e) {
-		console.error(`manox codechain: ${command} failed`, e);
+		// The host's injected log channel, never the console (review round-3).
+		log(`hierarchy command ${command} failed: ${errorText(e)}`);
 		throw new Error(`${command} failed: ${errorText(e)}`);
 	} finally {
 		clearTimeout(timer);
@@ -105,6 +110,10 @@ const position = (line: number, character: number): vscode.Position =>
 const NONE: never[] = [];
 
 export class VscodeLspClient implements LspClient {
+	/** `log` is the host-injected channel (registration.ts wraps the
+	 * LogOutputChannel); defaults to a no-op so tests construct bare. */
+	constructor(private readonly log: (message: string) => void = () => undefined) {}
+
 	async documentSymbols(uri: string): Promise<LspSymbol[]> {
 		const doc = await this.open(uri);
 		if (!doc) return [];
@@ -156,6 +165,7 @@ export class VscodeLspClient implements LspClient {
 
 	async outgoingCalls(item: LspItem): Promise<LspItem[]> {
 		const calls = await hierarchyProvider<vscode.CallHierarchyOutgoingCall>(
+			this.log,
 			'vscode.provideOutgoingCalls',
 			this.anchor(item),
 		);
@@ -164,6 +174,7 @@ export class VscodeLspClient implements LspClient {
 
 	async incomingCalls(item: LspItem): Promise<LspItem[]> {
 		const calls = await hierarchyProvider<vscode.CallHierarchyIncomingCall>(
+			this.log,
 			'vscode.provideIncomingCalls',
 			this.anchor(item),
 		);
@@ -186,7 +197,11 @@ export class VscodeLspClient implements LspClient {
 	}
 
 	async subtypes(item: LspItem): Promise<LspItem[]> {
-		const subs = await hierarchyProvider<vscode.TypeHierarchyItem>('vscode.provideSubtypes', this.anchor(item));
+		const subs = await hierarchyProvider<vscode.TypeHierarchyItem>(
+			this.log,
+			'vscode.provideSubtypes',
+			this.anchor(item),
+		);
 		return subs.map(callItem);
 	}
 
