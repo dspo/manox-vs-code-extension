@@ -41,7 +41,7 @@
         "manox.stateRoot": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Value for `MANOX_HOME` \u2014 the manox persistent-state root (threads database, session journals, provider config snapshot) used by the embedded runtime. Must not be the desktop app's `~/.manox` (the runtime lock is exclusive; contention terminates the extension host). Empty uses `~/.manox-vscode`."
+          "markdownDescription": "Value for `MANOX_HOME` — the manox persistent-state root (threads database, session journals, provider config snapshot) used by the embedded runtime. Defaults to the desktop app's `~/.manox` so both surfaces share threads, models and provider config (concurrent instances are safe); set a separate directory to isolate the extension's state."
         },
         "manox.approvalMode": {
           "type": "string",

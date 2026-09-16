@@ -58,11 +58,12 @@ Key invariants (from the manox architecture doc, `docs/dsh-v2-architecture.md`):
   (higher-`asOfSeq`-wins), never from a second domain mirror.
 - **Resync is the only recovery** (L5): entry-queue overflow or engine
   violation ends the stream and the client re-follows from a fresh snapshot.
-- **State-root isolation**: manox holds an exclusive flock on
-  `<MANOX_HOME>/runtime.lock` and *exits the process on contention*, so the
-  extension pins `MANOX_HOME` to a dedicated root (default `~/.manox-vscode`)
-  before loading the addon and starts the agent lazily (first use), never at
-  activation.
+- **Shared state root**: the extension defaults `MANOX_HOME` to the desktop
+  app's `~/.manox`, so threads, models and provider config are one surface.
+  Concurrent instances are safe (the old exclusive `runtime.lock` is gone;
+  the only remaining flock is the WS gateway lease, and contention there is
+  a loud no-op, never an exit). The agent still starts lazily (first use),
+  never at activation.
 
 ## The native binding
 
@@ -120,7 +121,7 @@ code --install-extension manox-vscode-*.vsix --force
 | Setting | Default | Meaning |
 |---|---|---|
 | `manox.sdkRoot` | *(unset)* | Directory containing `manox_napi.node`. |
-| `manox.stateRoot` | `~/.manox-vscode` | `MANOX_HOME` for the embedded runtime. Must not be the desktop app's `~/.manox` (exclusive runtime lock; contention terminates the extension host). An externally preset `MANOX_HOME` env var wins over this setting — the `/codechain` command provisions into the env root to match. |
+| `manox.stateRoot` | `~/.manox` | `MANOX_HOME` for the embedded runtime — shared with the desktop app by default so threads/models/provider config are one surface; set a separate directory to isolate. An externally preset `MANOX_HOME` env var wins over this setting — the `/codechain` command provisions into the env root to match. |
 | `manox.approvalMode` | `workspace-write` | Tool-authorization policy seeded into new sessions (`read-only` / `workspace-write` / `danger-full-access`). |
 
 Commands: `manox: Focus Chat`, `manox: New Session`, `manox: Open Code
