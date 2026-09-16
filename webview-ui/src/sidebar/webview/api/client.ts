@@ -105,7 +105,7 @@ bridge.onMessage((message: ToWebview) => {
 		return;
 	}
 	if ('kind' in message && (message as { kind: string }).kind === 'code_chain') {
-		// GenCodeChain succeeded out-of-band (§7): park its journal card on
+		// A Code Tutor chain succeeded out-of-band (§7): park its journal card on
 		// the owning session. The note carries the identity the panel reopen
 		// needs; the chain DATA lives host-side (workspaceState), never here.
 		const note = message as Extract<HostNote, { kind: 'code_chain' }>;

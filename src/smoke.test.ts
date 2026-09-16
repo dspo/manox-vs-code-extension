@@ -9,7 +9,7 @@
 // Submit receipt. No LLM turn is required; a state root without provider
 // config still exercises the whole control plane.
 //
-// A second case exercises the GenCodeChain `registerSessionTools` wire
+// A second case exercises the Code Tutor `registerSessionTools` wire
 // against the real server — the snake_case `input_schema`/`read_only` shape
 // (guards.test pins it statically; this confirms the running serde reads it).
 // The full invoke round-trip additionally needs (a) a model turn and (b) the
@@ -30,7 +30,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AgentConnection, type Wire } from './client/connection';
 import { clientToolSpec, registerSessionTools } from './protocol/builders';
-import { clientToolSpecs } from './codechain/tools';
+import { clientToolSpecs, TOOL_NAMES } from './codechain/tools';
 import { parseFromServer } from './protocol/guards';
 import { NapiTransport } from './transport/napiTransport';
 
@@ -141,7 +141,7 @@ maybe('live smoke against the real agent server', { timeout: 60_000 }, () => {
 				if (
 					frame.kind === 'request' &&
 					frame.call.method === 'invokeClientTool' &&
-					frame.call.name === 'GenCodeChain'
+					frame.call.name === TOOL_NAMES.entry
 				) {
 					invoked = true;
 					conn.sendRaw({
@@ -151,7 +151,7 @@ maybe('live smoke against the real agent server', { timeout: 60_000 }, () => {
 					});
 				}
 			});
-			await conn.submit(sessionId, '/codechain smoke');
+			await conn.submit(sessionId, '/tutor smoke');
 			// Best-effort wait for a turn to reach a tool call; a
 			// provider-less state root simply never invokes — the flag
 			// implies a configured model.

@@ -34,7 +34,7 @@ const DICT = {
   cc_implementations: { en: (n: number) => `${n} implementations`, zh: (n: number) => `${n} 个实现` },
   cc_candidates: { en: 'Candidates — click to pin', zh: '候选位置 — 点击选定' },
   cc_narrative: { en: 'Business narrative', zh: '业务叙事' },
-  cc_empty: { en: 'No chain loaded', zh: '尚未加载代码链' },
+  cc_empty: { en: 'No Code Tutor chain loaded', zh: '尚未加载代码导游' },
   cc_provenance_call: { en: 'call graph', zh: '调用图谱' },
   cc_provenance_type: { en: 'type graph', zh: '类型图谱' },
   cc_provenance_refs: { en: 'references', zh: '引用' },

@@ -240,7 +240,7 @@ export const Composer = ({
   //     for; the composer applies it ONLY when it is showing that exact
   //     thread. A draft composer (`sessionId === null`) must NEVER receive a
   //     note owned by another session (an early `owner && current && …`
-  //     form short-circuited past the null and leaked foreign `/codechain …`
+  //     form short-circuited past the null and leaked foreign `/tutor …`
   //     into a new thread). `shouldApplyComposePrefill` encodes the rule.
   //   * DRAFT SAFETY — a non-empty unsent draft is never silently
   //     overwritten; we focus and let the user decide (no auto-submit).

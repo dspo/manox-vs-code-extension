@@ -3,7 +3,7 @@
 // (manox-napi) through the v2 protocol. Activation is lazy — nothing starts
 // the agent runtime until a surface first needs it.
 //
-// The `/codechain` harness command is NOT provisioned here: the runtime's
+// The `/tutor` harness command is NOT provisioned here: the runtime's
 // command scan is one-shot inside `napiBinding.start()`, so the write rides
 // the synchronous boot path in the `AgentHost` constructor (see
 // codechain/command.ts + review #12) — activating can never race it.
@@ -41,7 +41,7 @@ function registerCodeChainCommands(context: vscode.ExtensionContext): void {
 			const chains = codeChainListChains();
 			if (chains.length === 0) {
 				await vscode.window.showInformationMessage(
-					'manox: no stored code chains yet — run /codechain in a conversation.',
+					'manox: no stored Code Tutor chains yet — run /tutor in a conversation.',
 				);
 				return;
 			}
@@ -52,7 +52,7 @@ function registerCodeChainCommands(context: vscode.ExtensionContext): void {
 					detail: new Date(chain.createdAt).toLocaleString(),
 					chainId: chain.chainId,
 				})),
-				{ placeHolder: 'Open a code chain' },
+				{ placeHolder: 'Open a Code Tutor chain' },
 			);
 			if (picked && !codeChainOpenChain(picked.chainId)) {
 				await vscode.window.showWarningMessage('manox: that chain is no longer stored.');

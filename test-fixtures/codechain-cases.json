@@ -1,5 +1,5 @@
 {
-  "_comment": "Shared GenCodeChain fixtures: a resolved CodeChain (the panel + tour + chainStore fold) and a draft tree with a FakeLspClient symbol map (the resolve engine). Consumed by src/codechain/{tour,chainStore,resolve}.test.ts and webview-ui/src/codechain/app.test.tsx. Mirrors the journal-cases.json discipline: one source, cross-layer.",
+  "_comment": "Shared Code Tutor fixtures: a resolved CodeChain (the panel + tour + chainStore fold) and a draft tree with a FakeLspClient symbol map (the resolve engine). Consumed by src/codechain/{tour,chainStore,resolve}.test.ts and webview-ui/src/codechain/app.test.tsx. Mirrors the journal-cases.json discipline: one source, cross-layer.",
   "chain": {
     "chainId": "cc-order-create",
     "sessionId": "s1",

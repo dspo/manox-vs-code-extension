@@ -1,4 +1,4 @@
-// GenCodeChain service assembly + the `registerSessionTools` lifecycle
+// Code Tutor service assembly + the `registerSessionTools` lifecycle
 // (§4, §9.2). One process-wide instance, installed lazily on the surface
 // that first holds an `AgentHost` (participant turn, sidebar resolve, panel
 // command) — activation never touches the runtime, so nothing here may run
