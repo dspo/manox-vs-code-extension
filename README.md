@@ -223,8 +223,10 @@ lock-step with the Rust `manox-protocol` crate (protocol epoch 6):
   qwen3.8-flash through Bailian, ~2K output tokens shared across
   thinking/text/tool JSON, whose calls truncated mid-JSON even at a
   ≤8-node shard, the cut point tracking the budget down (5334 → 3251
-  chars) — can reliably emit; `TutorEntry` (whole spine) and
-  `TutorExtend` (a ≤8-node block) remain large-budget shortcuts.
+  chars) — can reliably emit; `TutorEntry` seeds only the chain's single
+  entry node (no children — packing a whole tree into the seed reply was the
+  residual truncation source that this closes) and
+  `TutorExtend` (a ≤8-node block) remains a large-budget shortcut.
   `TutorNarrate` commits the chain's business story as its own
   call (a narrative + tree in one payload blew a ~5KB budget and cut the
   stream mid-JSON on a real model). Symbol positions resolve through the `vscode.execute*Provider`

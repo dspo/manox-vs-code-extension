@@ -51,7 +51,15 @@ describe('ensureCodeChainCommand (review #12)', () => {
 		expect(md).toContain('原样重发');
 		expect(md).toContain('payload too large');
 		expect(md).toContain(`≤${MAX_SUMMARY_CHARS}`);
-		expect(md).toContain(`≤${MAX_EXTEND_NODES}`);
+		// The `≤${MAX_EXTEND_NODES}` that survives is ONLY the TutorExtend block
+		// cap (a host guard on the children array); the workflow must NOT
+		// suggest a multi-node seed any more.
+		expect(md).toContain(`client_${TOOL_NAMES.extend} 一次补 ≤${MAX_EXTEND_NODES}`);
+		expect(md).not.toMatch(/一次播种整[棵个]?\s*≤\d+\s*节点/);
+		expect(md).not.toMatch(/播种[^。\n]*\d+\s*节点/);
+		// The seed step is explicitly single-entry-node-only.
+		expect(md).toContain('仅入口单节点');
+		expect(md).toContain('绝不带 children');
 		// Rebrand gate: the Code Tutor copy is in, and NO pre-rebrand tool
 		// name survives anywhere in the provisioned prompt.
 		expect(md).toContain('Code Tutor');

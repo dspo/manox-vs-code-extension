@@ -9,9 +9,13 @@
 // thinking/text/tool JSON) reliably clears even after the ≤8-node Extend
 // chunking still truncated it mid-JSON (the real-model cut point tracked the
 // budget: 5334 → 3251 chars, proving a multi-node payload is out of reach for
-// such a model, not just a too-long story). `TOOL_NAMES.entry` (whole spine
-// in one reply) and `TOOL_NAMES.extend` (a ≤8-node block) are kept for
-// large-budget models that can hold more than one node per call;
+// such a model, not just a too-long story). `TOOL_NAMES.entry` now seeds the
+// chain with a SINGLE entry node (no children — the recursive tree face was
+// the residual truncation source: even documenting a one-node seed, the schema
+// still ALLOWED a whole tree, so the model kept packing a multi-node spine
+// into the entry call and cut mid-JSON), and `TOOL_NAMES.extend` (a ≤8-node
+// block) stays a large-budget shortcut for models that can hold more than one
+// node per call;
 // `TOOL_NAMES.narrate` commits the business story as its OWN call so no
 // payload carries a whole flow AND
 // the story together. The payload guards below enforce each tool's budget with
@@ -99,35 +103,31 @@ export interface ToolSpec {
 // (seed guidance stays TIGHTER than the hard host caps — oversized drafts
 // are truncated with warnings, not rejected).
 const GEN_CODE_CHAIN_DESCRIPTION =
-	"Render an interactive code-reading tour of a business flow. Call this AFTER you have read the relevant code (with read/grep tools) and can explain the flow end-to-end. OUTPUT THE SPINE ONLY — NOT the narrative (see rule 5). THIS TOOL PUTS A WHOLE SUBTREE IN ONE REPLY and therefore needs a large output budget; the DEFAULT build path for every model — and the ONLY reliable one for a small-output model, whose tool JSON truncates mid-stream on any multi-node payload (the real-model evidence: a qwen3.8-flash reply through Bailian on a ~2K-token output budget cut at 5334 then 3251 chars, tracking the budget down) — is client_" +
+	"Render an interactive code-reading tour of a business flow. Call this AFTER you have read the relevant code (with read/grep tools) and can explain the flow end-to-end. client_" +
+	TOOL_NAMES.entry +
+	" creates the chain with a `title` and ONE entry node (the business trigger, e.g. the route handler) — NO children in `root`. Build the rest of the chain with client_" +
 	TOOL_NAMES.add +
-	", which adds exactly ONE node per call in narrative order. So either seed the whole spine here when you are confident the model can hold it, OR (default) seed just the entry with {title,question,root=<one entry node>} and append each following step with client_" +
-	TOOL_NAMES.add +
-	"; the ≤" +
+	", one node per call, in narrative order: the entry node is the seed, every following step is its own single-node call. This keeps each tool_use JSON tiny (a few hundred chars) — the only shape a small-output-budget model can emit without its tool JSON truncating mid-stream (the real-model evidence: a qwen3.8-flash reply through Bailian on a ~2K-token output budget cut at 5334 then 3251 chars, tracking the budget down whenever a call carried more than one node). The ≤" +
 	MAX_EXTEND_NODES +
 	"-node client_" +
 	TOOL_NAMES.extend +
-	" block stays a large-budget shortcut too. Curation rules, in priority order: (1) BUSINESS LOOP FIRST: include a node only when the step changes or carries business state data — acceptance -> core validation -> state change -> event/settlement -> outlet. Each `summary` (<= " +
+	" block stays a large-budget shortcut for a whole sub-area that must land together. Curation rules, in priority order: (1) BUSINESS LOOP FIRST: include a node only when the step changes or carries business state data — acceptance -> core validation -> state change -> event/settlement -> outlet. Each `summary` (<= " +
 	MAX_SUMMARY_CHARS +
-	" chars) says what happens BUSINESS-wise in the user's language, never a restatement of the code. (2) DO NOT DESCEND INTO BOILERPLATE: middleware chains, request-parameter format validation, idempotency checks, audit logging, error wrapping, and DTO conversion must NOT become nodes; if such a step has a genuine business exception, fold it into the parent's summary or `edgeNote` in one sentence. (3) PRUNE BRANCHES: expand only branches whose alternatives differ in business meaning; summarize all error/rollback paths in at most ONE kind='note' node. (4) SIZE: seed the spine only — <= " +
+	" chars) says what happens BUSINESS-wise in the user's language, never a restatement of the code. (2) DO NOT DESCEND INTO BOILERPLATE: middleware chains, request-parameter format validation, idempotency checks, audit logging, error wrapping, and DTO conversion must NOT become nodes; if such a step has a genuine business exception, fold it into the parent's summary or `edgeNote` in one sentence. (3) PRUNE BRANCHES: expand only branches whose alternatives differ in business meaning; summarize all error/rollback paths in at most ONE kind='note' node. (4) ONE ENTRY NODE HERE, NO TREE: `root` is a SINGLE entry node with NO `children` — do not pack the rest of the flow into it (that is exactly the multi-node payload that truncates; the host rejects a `root` carrying `children`). Grow the chain one node at a time with client_" +
+	TOOL_NAMES.add +
+	", or attach a whole sub-area as one <= " +
 	MAX_EXTEND_NODES +
-	" nodes and <= " +
-	(MAX_CHAIN_DEPTH - 1) +
-	" levels, and keep the WHOLE JSON of this call around ~2.5 KB or less (hard caps: " +
+	"-node block with client_" +
+	TOOL_NAMES.extend +
+	" when your model has a large output budget. (hard caps the host enforces across the whole chain: " +
 	MAX_CHAIN_NODES +
 	" nodes / " +
 	MAX_CHAIN_DEPTH +
-	" levels, over-tall or over-wide drafts are truncated; larger payloads are rejected by the host). Grow deeper or wider afterwards with client_" +
-	TOOL_NAMES.extend +
-	" (one <= " +
-	MAX_EXTEND_NODES +
-	"-node chunk) or, by default, one node at a time with client_" +
-	TOOL_NAMES.add +
-	". (5) NARRATIVE IS A SEPARATE CALL: do NOT put a `narrative` field here — once the chain is built (seed here, or spine + client_" +
+	" levels, over-tall or over-wide drafts are truncated; larger payloads are rejected). (5) NARRATIVE IS A SEPARATE CALL: do NOT put a `narrative` field here — once the chain is built (this entry node + client_" +
 	TOOL_NAMES.add +
 	" steps), call client_" +
 	TOOL_NAMES.narrate +
-	" once with the chainId and the 300-600 character coherent business story in markdown (trigger -> key decisions -> state transitions -> external consequences). Tree nodes are the anchors of THAT story, not a directory listing; the story rides its own call so neither the seed nor the narrative has to fit one payload. Contract (unchanged): NEVER report line numbers — give `file` (workspace-relative) and `symbol` (exact name, `Class.method` for methods); the host resolves precise locations via LSP and rejects bad ones, so prefer symbols you have actually seen in the files you read. Use kind='note' (no symbol) for conceptual steps with no single code location. If the host returns resolution errors, fix only the failed nodes and call again.";
+	" once with the chainId and the 300-600 character coherent business story in markdown (trigger -> key decisions -> state transitions -> external consequences). Tree nodes are the anchors of THAT story, not a directory listing; the story rides its own call so neither the seed node nor the narrative has to fit one payload. Contract (unchanged): NEVER report line numbers — give `file` (workspace-relative) and `symbol` (exact name, `Class.method` for methods); the host resolves precise locations via LSP and rejects bad ones, so prefer symbols you have actually seen in the files you read. Use kind='note' (no symbol) for conceptual steps with no single code location. If the host returns resolution errors, fix only the failed nodes and call again.";
 
 const EXPAND_DESCRIPTION =
 	'Expand one node of an existing code chain with REAL call-graph edges resolved by the host via LSP call hierarchy — no guessing, no token cost for reading files. Use when the user asks to go deeper ("这个函数里面还调了什么"/"谁调用了它") or for a real caller/callee edge you confirmed in code. For a node whose CHILDREN you already read and understood, prefer client_' +
@@ -155,13 +155,11 @@ const ANNOTATE_DESCRIPTION =
 const ADD_CODE_CHAIN_NODE_DESCRIPTION =
 	'Add exactly ONE node to a code chain — call it once per step of the business story, in narrative order (this node\'s moment comes after the node named by `parentId`). This is the DEFAULT way to build a chain and the only one a small-output-budget model can finish: each call\'s JSON stays around ~300 chars, well under what those models can emit without truncating. Omit `chainId` to append to this session\'s most recently created/updated chain; to START a chain call it with just a first node (kind=\'entry\', no `chainId` and no `parentId`) — the reply returns the new `chainId` to use for every later node. Set `parentId` to the id of the node this step follows (from the previous reply\'s `nodeId`); omit it to attach to the root of a just-seeded chain. The node carries the same fields as client_' +
 	TOOL_NAMES.entry +
-	"'s tree nodes: `summary` (<= " +
+	"'s entry node: `summary` (<= " +
 	MAX_SUMMARY_CHARS +
 	" chars, what happens BUSINESS-wise in the user language) and `beat` (<= " +
 	MAX_BEAT_CHARS +
 	" chars, this step's one moment in the story); NEVER report line numbers — give `file` (workspace-relative) and `symbol` (exact name, `Class.method` for methods) you have actually seen, and use kind='note' (no symbol) for a conceptual step with no single code location. NEVER put a `children` array here — one node per call; call again for the next step. Only when a node's subtree must land together and the model has a large output budget, prefer client_" +
-	TOOL_NAMES.entry +
-	' (whole spine) or client_' +
 	TOOL_NAMES.extend +
 	' (a <= ' +
 	MAX_EXTEND_NODES +
@@ -199,11 +197,12 @@ const MAX_ADD_PAYLOAD_CHARS = 1_200;
 const MAX_NARRATE_PAYLOAD_CHARS = 2_000;
 
 const payloadTooLarge = (toolName: string, actual: number, limit: number): string =>
-	`payload too large: ${actual} chars exceeds the ${limit} char limit for ${toolName}. Shrink it: keep the whole tree inside one block of <= ${MAX_EXTEND_NODES} new nodes per call (seed the spine with client_${TOOL_NAMES.entry}, attach the rest one block at a time via client_${TOOL_NAMES.extend}), keep every \`summary\` <= ${MAX_SUMMARY_CHARS} chars, drop boilerplate steps (middleware, parameter validation, logging, DTO conversion) and the oversized narrative (<= ${MAX_NARRATIVE_CHARS} chars) — NEVER resend the same payload unchanged.`;
+	`payload too large: ${actual} chars exceeds the ${limit} char limit for ${toolName}. Shrink it: seed the chain with just the entry node via client_${TOOL_NAMES.entry} (NO \`children\`), then add the rest ONE node per call via client_${TOOL_NAMES.add} — or, when a whole sub-area must land together and you have a large output budget, attach it as one block of <= ${MAX_EXTEND_NODES} new nodes via client_${TOOL_NAMES.extend}; keep every \`summary\` <= ${MAX_SUMMARY_CHARS} chars, drop boilerplate steps (middleware, parameter validation, logging, DTO conversion) and the oversized narrative (<= ${MAX_NARRATIVE_CHARS} chars) — NEVER resend the same payload unchanged.`;
 
-/** Draft-node properties, shared by both tree-bearing schemas (Gen's
- * recursive root and Extend's `children` items) so the two wire faces can
- * never drift apart. */
+/** Draft-node properties, shared by every tree-bearing schema face (the entry
+ * seed node, Extend's `children` items) so the wire faces can never drift
+ * apart. The seed's `entryNode` deliberately omits `children` — a single entry
+ * node cannot carry a tree. */
 const NODE_PROPERTIES = {
 	id: { type: 'string', description: 'Stable slug, unique in the tree, e.g. "order-service.create".' },
 	label: { type: 'string', description: 'Display name (usually the symbol name).' },
@@ -218,27 +217,36 @@ const NODE_PROPERTIES = {
 	beat: { type: 'string', maxLength: MAX_BEAT_CHARS, description: 'This node\'s one story-beat inside the narrative (<= 60 chars).' },
 };
 
-/** The draft-tree JSON Schema (recursion via `$defs`/`$ref` — a JS object
- * literal with a self-reference would break `JSON.stringify` on send). No
- * `narrative` here: the business story is committed separately with
- * `TOOL_NAMES.narrate` so the seed tree and the story never share one
- * output-budget-bound payload (see the module header). */
-const draftTreeSchema = {
+/** `TOOL_NAMES.entry` input: the chain `title` + `question` and a SINGLE
+ * entry node as `root`. `root` points at `$defs.entryNode` — the shared node
+ * fields MINUS `children` — so the schema itself cannot invite a multi-node
+ * tree into the one seed call. That was the residual truncation source: even
+ * after TutorAdd went single-node, the recursive `root` let a small-output
+ * model keep packing a whole spine into the entry reply and cut it mid-JSON.
+ * The handler additionally REJECTS any `root.children` (see `genCodeChain`) so
+ * the only remaining shape is one node here + one node per
+ * `TOOL_NAMES.add` call. No `narrative` here: the business story is committed
+ * separately with `TOOL_NAMES.narrate` (see the module header). */
+const entrySchema = {
 	$schema: 'https://json-schema.org/draft/2020-12/schema',
 	type: 'object',
 	required: ['title', 'question', 'root'],
 	properties: {
 		title: { type: 'string', description: 'Short name of the business flow, e.g. "订单创建流程".' },
 		question: { type: 'string', description: "The user's original question." },
-		root: { $ref: '#/$defs/node' },
+		root: { $ref: '#/$defs/entryNode' },
 	},
 	$defs: {
-		node: {
+		entryNode: {
 			type: 'object',
 			required: ['id', 'label', 'kind', 'file', 'summary'],
+			// `additionalProperties:false` is deliberately NOT set: the handler
+			// reads `root.children` itself so it can answer an actionable
+			// "single entry node, then add the rest one node per
+			// client_TutorAdd call" isError instead of the model silently
+			// dropping a whole subtree it tried to send.
 			properties: {
 				...NODE_PROPERTIES,
-				children: { type: 'array', items: { $ref: '#/$defs/node' } },
 			},
 		},
 	},
@@ -339,7 +347,7 @@ export function clientToolSpecs(): ToolSpec[] {
 		{
 			name: TOOL_NAMES.entry,
 			description: GEN_CODE_CHAIN_DESCRIPTION,
-			inputSchema: draftTreeSchema,
+			inputSchema: entrySchema,
 			readOnly: true,
 		},
 		{
@@ -347,11 +355,11 @@ export function clientToolSpecs(): ToolSpec[] {
 			description:
 				'Commit the business story of an existing code chain — call this right AFTER client_' +
 				TOOL_NAMES.entry +
-				' seeds the spine (the seed call itself carries NO narrative; the story rides this separate call so neither payload has to fit the model output budget together). Pass the `chainId` from the client_' +
+				' seeds the chain with its single entry node (the seed call itself carries NO narrative; the story rides this separate call so neither payload has to fit the model output budget together). Pass the `chainId` from the client_' +
 				TOOL_NAMES.entry +
 				' reply and ONLY the narrative text: a 300-600 character coherent business story in markdown (trigger -> key decisions -> state transitions -> external consequences), in the user language, <= ' +
 				MAX_NARRATIVE_CHARS +
-				' chars (longer is truncated). The tree nodes are the anchors of THAT story; write what the spine you just seeded adds up to, not a directory listing. This only sets the narrative — the tree is untouched; re-call to replace the story.',
+				' chars (longer is truncated). The tree nodes are the anchors of THAT story; write what the chain you built adds up to, not a directory listing. This only sets the narrative — the tree is untouched; re-call to replace the story.',
 			inputSchema: narrateSchema,
 			readOnly: true,
 		},
@@ -514,8 +522,20 @@ export class CodeChainTools {
 		}
 	}
 
-	// ── TutorEntry (chain seed) ─────────────────────────────────────────────
+	// ── TutorEntry (chain seed — a SINGLE entry node) ───────────────────────
 
+	/** Seed a chain from exactly ONE entry node: the chain `title`, the user's
+	 * `question`, and `root` = a single entry node with NO children. The whole
+	 * point of this revision is that the seed call carries a single node, not a
+	 * tree: the recursive `root` was the residual truncation source — even after
+	 * TutorAdd went single-node, the model kept packing a multi-node spine into
+	 * the entry reply (a schema that ALLOWS children trains that behavior) and
+	 * cut it mid-JSON, because a small-output-budget model (qwen3.8-flash via
+	 * Bailian, <1KB usable tool JSON) cannot emit a tree in one tool_use. So
+	 * the schema drops `children` and the handler REJECTS any `root.children`
+	 * (never tolerant — rejection is what trains the model to shard node-by-node
+	 * via client_TutorAdd, one node per call, in narrative order). The business
+	 * story is committed on its own client_TutorNarrate call. */
 	private async genCodeChain(call: InvokeCall, reply: ReplySinks): Promise<void> {
 		const input = asRecord(call.input);
 		if (!input) return failText(reply, `${TOOL_NAMES.entry} input must be an object`);
@@ -530,24 +550,33 @@ export class CodeChainTools {
 		if (input.narrative !== undefined) {
 			return failText(
 				reply,
-				`${TOOL_NAMES.entry} no longer accepts a \`narrative\` field. Seed the spine here, then commit the business story with a separate client_${TOOL_NAMES.narrate} call ({chainId, narrative}) using this reply's chainId.`,
+				`${TOOL_NAMES.entry} no longer accepts a \`narrative\` field. Seed the single entry node here, then commit the business story with a separate client_${TOOL_NAMES.narrate} call ({chainId, narrative}) using this reply's chainId.`,
+			);
+		}
+		// The seed is ONE node. A `children` field on `root` means the model
+		// packed a tree into the entry call — the exact failure this revision
+		// exists to stop — so reject it with the sharding recipe instead of
+		// resolving a multi-node subtree (a tree here truncates the same way a
+		// tree anywhere else does). Check the raw `root`, not the parsed draft:
+		// `parseDraft` always emits a `children: []`, so only the input can tell
+		// "no children" apart from "an empty children field"; and reject the
+		// field even when empty, because silently dropping it would not teach
+		// the model to stop sending a tree.
+		const rootRec = asRecord(input.root);
+		if (rootRec && rootRec.children !== undefined) {
+			return failText(
+				reply,
+				`client_${TOOL_NAMES.entry} takes a SINGLE entry node without \`children\`. Call it with just the entry, then add the rest one node per client_${TOOL_NAMES.add} call.`,
 			);
 		}
 		const rootParse = parseDraft(input.root, '');
 		if (!title || !rootParse.draft) {
 			return failText(
 				reply,
-				`${TOOL_NAMES.entry} requires \`title\` and a \`root\` node with {id,label,kind,file,summary}; every child needs the same shape (the narrative is committed separately with client_${TOOL_NAMES.narrate})`,
+				`${TOOL_NAMES.entry} requires \`title\` and a single \`root\` entry node with {id,label,kind,file,summary} and NO \`children\` (add the rest of the chain one node per client_${TOOL_NAMES.add} call; commit the narrative separately with client_${TOOL_NAMES.narrate})`,
 			);
 		}
 		const { draft, warnings } = validateDraft(rootParse.draft);
-		// Malformed nodes `parseDraft` dropped are reported as failures so the
-		// model can repair them (review round-2, issue: they used to vanish
-		// silently while the reply still claimed the tree was fine).
-		const dropped: { id: string; reason: string }[] = rootParse.dropped.map((where) => ({
-			id: where,
-			reason: `dropped \`${where}\` — missing/invalid id, label, or kind (see the tool schema)`,
-		}));
 		const key = `${call.sessionId}:${draft.id}`;
 		const { chain, failures } = await resolveChain(this.deps, {
 			sessionId: call.sessionId,
@@ -555,20 +584,17 @@ export class CodeChainTools {
 			question,
 			root: draft,
 		});
-		if (dropped.length > 0) {
-			failures.unshift(...dropped);
-		}
 		if (failures.length > 0) {
 			const attempts = (this.correctionAttempts.get(key) ?? 0) + 1;
 			this.correctionAttempts.set(key, attempts);
 			if (attempts <= MAX_CORRECTION_ROUNDS) {
-				// Self-correction loop: every failure names its node.
+				// Self-correction loop: the single entry node failed to resolve.
 				return fail(reply, {
 					ok: false,
 					attempt: attempts,
 					maxAttempts: MAX_CORRECTION_ROUNDS + 1,
 					failures: failures.map((f) => ({ nodeId: f.id, reason: f.reason })),
-					hint: `Fix ONLY the listed nodes (file/symbol you have actually read) and call client_${TOOL_NAMES.entry} again with the whole tree.`,
+					hint: `Fix ONLY the entry node's \`file\`/\`symbol\` (a symbol you have actually read) and call client_${TOOL_NAMES.entry} again with the single corrected entry node.`,
 				});
 			}
 			this.correctionAttempts.delete(key);
@@ -580,12 +606,14 @@ export class CodeChainTools {
 			ok: true,
 			chainId: chain.chainId,
 			title: chain.title,
+			nodeId: chain.root.id,
 			nodeCount: chain.stats.nodeCount,
 			unresolvedCount: chain.stats.unresolvedCount,
 			panelOpened: true,
-			// The spine is up but the story is not: point the model at the two
-			// follow-up calls that stay within one output budget each.
-			nextStep: `call client_${TOOL_NAMES.narrate} with the business story, then extend with client_${TOOL_NAMES.extend}`,
+			// The single entry node is up but the chain is not, and neither is
+			// the story: point the model at the node-by-node build path, then
+			// the narrative call — each stays within one output budget.
+			nextStep: `add the rest of the chain one node per client_${TOOL_NAMES.add} call (parentId = the entry node's nodeId), then commit the business story with client_${TOOL_NAMES.narrate}`,
 			...(warnings.length > 0 ? { warnings } : {}),
 			...(failures.length > 0
 				? { note: `${failures.length} node(s) stayed unresolved after ${MAX_CORRECTION_ROUNDS} correction rounds; they render as warnings` }
@@ -823,14 +851,15 @@ export class CodeChainTools {
 	// ── TutorAdd (the node-by-node default path) ──────────────────────────────
 
 	/** Append exactly ONE node to a chain — the small-output-budget default.
-	 * client_`TOOL_NAMES.entry`/client_`TOOL_NAMES.extend` ask a model to emit a
-	 * whole spine / ≤8-node block in one tool_use, which a ~2K-token-output
-	 * model (qwen3.8-flash via Bailian) cannot do without its JSON truncating
-	 * mid-stream (the real-model cut point tracked the budget: 5334 → 3251
-	 * chars). One ~300-char node per call stays under the <1KB usable-tool-JSON
-	 * floor every model clears, so this is the recommended build path; the
-	 * whole-tree tools remain for large-budget models. The three shapes this
-	 * one handler covers, decided by which ids the caller passed:
+	 * client_`TOOL_NAMES.extend` still asks a model to emit a ≤8-node block in
+	 * one tool_use, which a ~2K-token-output model (qwen3.8-flash via Bailian)
+	 * cannot do without its JSON truncating mid-stream (the real-model cut point
+	 * tracked the budget: 5334 → 3251 chars); client_`TOOL_NAMES.entry` is now a
+	 * SINGLE entry node for the same reason. One ~300-char node per call stays
+	 * under the <1KB usable-tool-JSON floor every model clears, so this is the
+	 * recommended build path; the ≤8-node Extend block remains a large-budget
+	 * shortcut. The three shapes this one handler covers, decided by which ids
+	 * the caller passed:
 	 *   - `chainId` + `parentId` present → append under that node.
 	 *   - both omitted → append to the session's newest chain, at root.
 	 *   - both omitted AND no chain exists → SEED a new chain whose root is
@@ -931,7 +960,7 @@ export class CodeChainTools {
 			if (overDepth || overBudget) {
 				return failText(
 					reply,
-					`${TOOL_NAMES.add} rejected: the chain already hits the ${overBudget ? `${MAX_CHAIN_NODES}-node` : `${MAX_CHAIN_DEPTH}-level`} cap, so this node cannot attach without truncating the tour — prune or re-seed a smaller spine with client_${TOOL_NAMES.entry} instead.`,
+					`${TOOL_NAMES.add} rejected: the chain already hits the ${overBudget ? `${MAX_CHAIN_NODES}-node` : `${MAX_CHAIN_DEPTH}-level`} cap, so this node cannot attach without truncating the tour — prune a node first, or start a tighter chain (client_${TOOL_NAMES.entry} seeds a single entry node, then add fewer, higher-value steps with client_${TOOL_NAMES.add}).`,
 				);
 			}
 			const resolved = await this.resolveSingle(draft);
