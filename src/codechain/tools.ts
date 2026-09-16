@@ -1,6 +1,10 @@
-// The four GenCodeChain client tools (§4): their wire specs (what the model
+// The five GenCodeChain client tools (§4): their wire specs (what the model
 // sees) and the invoke handlers (what the host runs when the server routes
-// an `invokeClientTool` ServerCall here).
+// an `invokeClientTool` ServerCall here). GenCodeChain seeds a spine +
+// narrative; ExtendCodeChainNode grows the tree in ≤ MAX_EXTEND_NODES
+// chunks, so no single payload has to carry a whole business flow (the
+// payload guards below reject oversized drafts with shard guidance instead
+// of letting the server truncate them silently).
 //
 // Reply contract (§9.3, pinned by guards.test): every business outcome —
 // success, self-correction feedback, hard failure — answers through
@@ -18,7 +22,7 @@
 
 import { errorText } from '../util';
 import type { ChainStore } from './chainStore';
-import { replaceNode, withStats } from './chainStore';
+import { countNodes, replaceNode, withStats } from './chainStore';
 import type {
 	ChainCandidate,
 	ChainLocation,
@@ -27,11 +31,19 @@ import type {
 	ChainNodeDraft,
 	ResolvedNode,
 } from './types';
-import { MAX_SUMMARY_CHARS } from './types';
+import {
+	MAX_BEAT_CHARS,
+	MAX_CHAIN_DEPTH,
+	MAX_CHAIN_NODES,
+	MAX_EXTEND_NODES,
+	MAX_NARRATIVE_CHARS,
+	MAX_SUMMARY_CHARS,
+} from './types';
 import {
 	expandNode,
 	expansionKey,
 	resolveChain,
+	resolveFileUri,
 	resolveSymbol,
 	validateDraft,
 	type ResolveDeps,
@@ -46,21 +58,67 @@ export interface ToolSpec {
 	readOnly: boolean;
 }
 
+// Business-first curation rules, in priority order. They replace the old
+// generic "meaningful step" wording because, left to itself, the model
+// dumps middleware/validators/error plumbing and treats the depth budget as
+// the goal instead of the business story. The size numbers mirror types.ts
+// (seed guidance stays TIGHTER than the hard host caps — oversized drafts
+// are truncated with warnings, not rejected).
 const GEN_CODE_CHAIN_DESCRIPTION =
-	"Render an interactive code-reading tour for the user. Call this AFTER you have read the relevant code (with read/grep tools) and can explain a business flow end-to-end. Output a tree: the entry point as root, each child a meaningful step in the flow (calls, implementations, config, domain events). Rules: (1) NEVER report line numbers — give `file` (workspace-relative) and `symbol` (exact name, `Class.method` for methods); the host resolves precise locations via LSP and rejects bad ones, so prefer symbols you have actually seen in the files you read. (2) Every node needs a `summary` explaining its BUSINESS meaning in the user's language, not a restatement of the code. (3) `edgeNote` explains why this step follows its parent. (4) Keep depth <= 5 and <= 40 nodes: cover the main flow, omit logging/error-plumbing unless the user asked. (5) Use kind='note' (no symbol) for conceptual steps that have no single code location. If the host returns resolution errors, fix only the failed nodes and call again.";
+	"Render an interactive code-reading tour of a business flow. Call this AFTER you have read the relevant code (with read/grep tools) and can explain the flow end-to-end. Output a tree plus a `narrative`. Curation rules, in priority order: (1) BUSINESS LOOP FIRST: include a node only when the step changes or carries business state data — acceptance -> core validation -> state change -> event/settlement -> outlet. Each `summary` (<= 120 chars) says what happens BUSINESS-wise in the user's language, never a restatement of the code. (2) DO NOT DESCEND INTO BOILERPLATE: middleware chains, request-parameter format validation, idempotency checks, audit logging, error wrapping, and DTO conversion must NOT become nodes; if such a step has a genuine business exception, fold it into the parent's summary or `edgeNote` in one sentence. (3) PRUNE BRANCHES: expand only branches whose alternatives differ in business meaning; summarize all error/rollback paths in at most ONE kind='note' node. (4) SIZE: seed the spine only — <= 12 nodes and <= 3 levels (hard caps: " + MAX_CHAIN_NODES + " nodes / 4 levels, over-tall or over-wide drafts are truncated); grow deeper or wider afterwards with client_ExtendCodeChainNode, one chunk of <= " + MAX_EXTEND_NODES + " new nodes per call. (5) `narrative` IS REQUIRED: a 300-600 character coherent business story in markdown (trigger -> key decisions -> state transitions -> external consequences); tree nodes are the anchors of THAT story, not a directory listing. Contract (unchanged): NEVER report line numbers — give `file` (workspace-relative) and `symbol` (exact name, `Class.method` for methods); the host resolves precise locations via LSP and rejects bad ones, so prefer symbols you have actually seen in the files you read. Use kind='note' (no symbol) for conceptual steps with no single code location. If the host returns resolution errors, fix only the failed nodes and call again.";
 
 const EXPAND_DESCRIPTION =
-	"Expand one node of an existing code chain with REAL call-graph edges resolved by the host via LSP call hierarchy — no guessing, no token cost for reading files. Use when the user asks to go deeper (\"这个函数里面还调了什么\"/\"谁调用了它\"). direction='callees' expands what the node calls; 'callers' expands who calls it. Afterwards use client_AnnotateCodeChainNode to add business meaning to the newly added nodes.";
+	"Expand one node of an existing code chain with REAL call-graph edges resolved by the host via LSP call hierarchy — no guessing, no token cost for reading files. Use when the user asks to go deeper (\"这个函数里面还调了什么\"/\"谁调用了它\") or for a real caller/callee edge you confirmed in code. For a node whose CHILDREN you already read and understood, prefer client_ExtendCodeChainNode (your curated draft subtree, with beats); use this tool when the edge set itself must come from the graph. direction='callees' expands what the node calls; 'callers' expands who calls it. Afterwards use client_AnnotateCodeChainNode to add business meaning to the newly added nodes.";
+
+const ANNOTATE_DESCRIPTION =
+	'Attach business semantics (summary / edgeNote) to a node of an existing code chain — typically right after client_ExpandCodeChainNode added LSP-resolved nodes that have no annotation yet (newly drafted nodes carry their own summary/beat through client_ExtendCodeChainNode). Only the named node changes; everything else keeps its state.';
+
+// ── payload guards (progressive-building contract) ─────────────────────────
+//
+// The server forwards a client-tool input as one serialized frame; an
+// oversized draft (the model ignoring the seed caps) would either die
+// opaquely in transport or arrive half-truncated. Reject it HERE with the
+// actual size + the exact re-shard recipe, so the correction loop can act:
+// smaller chunks via client_ExtendCodeChainNode, summaries <= 120 chars,
+// NEVER the same payload resent.
+
+const MAX_GEN_PAYLOAD_CHARS = 6_000;
+const MAX_EXTEND_PAYLOAD_CHARS = 4_000;
+
+const payloadTooLarge = (toolName: string, actual: number, limit: number): string =>
+	`payload too large: ${actual} chars exceeds the ${limit} char limit for ${toolName}. Shrink it: keep the whole tree inside one block of <= ${MAX_EXTEND_NODES} new nodes per call (seed the spine with client_GenCodeChain, attach the rest one block at a time via client_ExtendCodeChainNode), keep every \`summary\` <= ${MAX_SUMMARY_CHARS} chars, drop boilerplate steps (middleware, parameter validation, logging, DTO conversion) and the oversized narrative (<= ${MAX_NARRATIVE_CHARS} chars) — NEVER resend the same payload unchanged.`;
+
+/** Draft-node properties, shared by both tree-bearing schemas (Gen's
+ * recursive root and Extend's `children` items) so the two wire faces can
+ * never drift apart. */
+const NODE_PROPERTIES = {
+	id: { type: 'string', description: 'Stable slug, unique in the tree, e.g. "order-service.create".' },
+	label: { type: 'string', description: 'Display name (usually the symbol name).' },
+	kind: {
+		type: 'string',
+		enum: ['entry', 'call', 'impl', 'interface', 'config', 'data', 'note'],
+	},
+	file: { type: 'string', description: 'Workspace-relative path (no absolute paths, no line numbers).' },
+	symbol: { type: 'string', description: "Exact symbol name; `Class.method` for members. Omit only for kind='note'." },
+	summary: { type: 'string', maxLength: MAX_SUMMARY_CHARS, description: 'What happens BUSINESS-wise, in the user language (<= 120 chars).' },
+	edgeNote: { type: 'string', description: 'Why this step follows its parent.' },
+	beat: { type: 'string', maxLength: MAX_BEAT_CHARS, description: 'This node\'s one story-beat inside the narrative (<= 60 chars).' },
+};
 
 /** The draft-tree JSON Schema (recursion via `$defs`/`$ref` — a JS object
  * literal with a self-reference would break `JSON.stringify` on send). */
 const draftTreeSchema = {
 	$schema: 'https://json-schema.org/draft/2020-12/schema',
 	type: 'object',
-	required: ['title', 'question', 'root'],
+	required: ['title', 'question', 'narrative', 'root'],
 	properties: {
 		title: { type: 'string', description: 'Short name of the business flow, e.g. "订单创建流程".' },
 		question: { type: 'string', description: "The user's original question." },
+		narrative: {
+			type: 'string',
+			maxLength: MAX_NARRATIVE_CHARS,
+			description: 'The coherent business story this tree anchors (markdown, 300-600 chars).',
+		},
 		root: { $ref: '#/$defs/node' },
 	},
 	$defs: {
@@ -68,16 +126,39 @@ const draftTreeSchema = {
 			type: 'object',
 			required: ['id', 'label', 'kind', 'file', 'summary'],
 			properties: {
-				id: { type: 'string', description: 'Stable slug, unique in the tree, e.g. "order-service.create".' },
-				label: { type: 'string', description: 'Display name (usually the symbol name).' },
-				kind: {
-					type: 'string',
-					enum: ['entry', 'call', 'impl', 'interface', 'config', 'data', 'note'],
-				},
-				file: { type: 'string', description: 'Workspace-relative path (no absolute paths, no line numbers).' },
-				symbol: { type: 'string', description: "Exact symbol name; `Class.method` for members. Omit only for kind='note'." },
-				summary: { type: 'string', maxLength: MAX_SUMMARY_CHARS, description: 'Business meaning in the user language.' },
-				edgeNote: { type: 'string', description: 'Why this step follows its parent.' },
+				...NODE_PROPERTIES,
+				children: { type: 'array', items: { $ref: '#/$defs/node' } },
+			},
+		},
+	},
+};
+
+/** ExtendCodeChainNode input: one parent + a ≤ MAX_EXTEND_NODES chunk of
+ * new children under it (same recursive node shape as the seed tree). */
+const extendSchema = {
+	$schema: 'https://json-schema.org/draft/2020-12/schema',
+	type: 'object',
+	required: ['chainId', 'parentId', 'children'],
+	properties: {
+		chainId: { type: 'string' },
+		parentId: { type: 'string', description: 'Existing node the children attach under.' },
+		narrative: {
+			type: 'string',
+			maxLength: MAX_NARRATIVE_CHARS,
+			description: 'Optional replacement for the chain narrative (pass the UPDATED story when this chunk changes it; omit to keep the current one).',
+		},
+		children: {
+			type: 'array',
+			maxItems: MAX_EXTEND_NODES,
+			items: { $ref: '#/$defs/node' },
+		},
+	},
+	$defs: {
+		node: {
+			type: 'object',
+			required: ['id', 'label', 'kind', 'file', 'summary'],
+			properties: {
+				...NODE_PROPERTIES,
 				children: { type: 'array', items: { $ref: '#/$defs/node' } },
 			},
 		},
@@ -90,6 +171,13 @@ export function clientToolSpecs(): ToolSpec[] {
 			name: 'GenCodeChain',
 			description: GEN_CODE_CHAIN_DESCRIPTION,
 			inputSchema: draftTreeSchema,
+			readOnly: true,
+		},
+		{
+			name: 'ExtendCodeChainNode',
+			description:
+				"Grow an existing code chain: attach a block of <= " + MAX_EXTEND_NODES + " NEW draft nodes under an existing one (parentId = chain node id from client_GenCodeChain or an earlier client_ExtendCodeChainNode reply). Use this after the seed to go deeper or wider, one business sub-area per call — read the parent function first and keep every node on the business loop (boilerplate stays out, same curation rules as client_GenCodeChain). Each new node carries its own `summary` and optional `beat`; pass an UPDATED `narrative` only when this block changes the story. The host resolves every symbol through LSP and runs the same self-correction loop, so submit only symbols you have actually seen.",
+			inputSchema: extendSchema,
 			readOnly: true,
 		},
 		{
@@ -109,8 +197,7 @@ export function clientToolSpecs(): ToolSpec[] {
 		},
 		{
 			name: 'AnnotateCodeChainNode',
-			description:
-				'Attach business semantics (summary / edgeNote) to a node of an existing code chain — typically right after client_ExpandCodeChainNode added LSP-resolved nodes that have no annotation yet. Only the named node changes; everything else keeps its state.',
+			description: ANNOTATE_DESCRIPTION,
 			inputSchema: {
 				type: 'object',
 				required: ['chainId', 'nodeId'],
@@ -198,6 +285,9 @@ export class CodeChainTools {
 				case 'GenCodeChain':
 					await this.genCodeChain(call, reply);
 					return true;
+				case 'ExtendCodeChainNode':
+					await this.extendCodeChain(call, reply);
+					return true;
 				case 'ExpandCodeChainNode':
 					await this.expand(call, reply);
 					return true;
@@ -223,16 +313,18 @@ export class CodeChainTools {
 	private async genCodeChain(call: InvokeCall, reply: ReplySinks): Promise<void> {
 		const input = asRecord(call.input);
 		if (!input) return failText(reply, 'GenCodeChain input must be an object');
+		if (this.guardPayload(reply, call.input, MAX_GEN_PAYLOAD_CHARS, 'GenCodeChain')) return;
 		const title = asString(input.title);
 		const question = asString(input.question) ?? '';
+		const narrative = asString(input.narrative) ?? undefined;
 		const rootParse = parseDraft(input.root, '');
 		if (!title || !rootParse.draft) {
 			return failText(
 				reply,
-				'GenCodeChain requires `title` and a `root` node with {id,label,kind,file,summary}; every child needs the same shape',
+				'GenCodeChain requires `title`, `narrative` (the business story), and a `root` node with {id,label,kind,file,summary}; every child needs the same shape',
 			);
 		}
-		const { draft, warnings } = validateDraft(rootParse.draft);
+		const { draft, warnings, narrative: validatedNarrative } = validateDraft(rootParse.draft, narrative);
 		// Malformed nodes `parseDraft` dropped are reported as failures so the
 		// model can repair them (review round-2, issue: they used to vanish
 		// silently while the reply still claimed the tree was fine).
@@ -246,6 +338,7 @@ export class CodeChainTools {
 			title,
 			question,
 			root: draft,
+			...(validatedNarrative !== undefined ? { narrative: validatedNarrative } : {}),
 		});
 		if (dropped.length > 0) {
 			failures.unshift(...dropped);
@@ -291,6 +384,177 @@ export class CodeChainTools {
 			title: chain.title,
 			nodeCount: chain.stats.nodeCount,
 		});
+	}
+
+	// ── payload guard (shared by the two draft-bearing tools) ───────────────
+
+	/** Answer a shard-guidance failure when the raw input serializes past
+	 * `limit`; returns true (caller must stop) when it did. The size is
+	 * measured on `JSON.stringify(input)` — the shape that travels the wire,
+	 * so the number in the message matches what the model actually sent. */
+	private guardPayload(reply: ReplySinks, input: unknown, limit: number, toolName: string): boolean {
+		const actual = JSON.stringify(input ?? null)?.length ?? 0;
+		if (actual <= limit) return false;
+		// `reply.ok(content, isError:true)` = the fail-text channel; the model
+		// reads the guidance and re-shards, never an RPC Err (§9.3).
+		failText(reply, payloadTooLarge(toolName, actual, limit));
+		return true;
+	}
+
+	// ── ExtendCodeChainNode ─────────────────────────────────────────────────
+
+	/** Attach a chunk of ≤ MAX_EXTEND_NODES new draft children under an
+	 * existing node. Resolution runs per-call (fresh memos, same self-
+	 * correct gate as GenCodeChain keyed by session + chain + parent). */
+	private async extendCodeChain(call: InvokeCall, reply: ReplySinks): Promise<void> {
+		const loaded = this.chainOf(call, reply, 'ExtendCodeChainNode');
+		if (!loaded) return;
+		if (this.guardPayload(reply, call.input, MAX_EXTEND_PAYLOAD_CHARS, 'ExtendCodeChainNode')) return;
+		const { input, chain } = loaded;
+		const parentId = asString(input.parentId);
+		if (!parentId) return failText(reply, 'ExtendCodeChainNode requires `parentId` (an existing chain node id)');
+		if (!Array.isArray(input.children) || input.children.length === 0) {
+			return failText(reply, 'ExtendCodeChainNode requires a non-empty `children` array (<= ' + MAX_EXTEND_NODES + ' new nodes per call)');
+		}
+		const parent = findNode(chain.root, parentId);
+		if (!parent) {
+			const ids = [...flatten(chain.root)].slice(0, 10).map((n) => `\`${n.id}\``);
+			return fail(reply, {
+				ok: false,
+				error: `no node \`${parentId}\` in chain \`${chain.chainId}\``,
+				availableIds: ids,
+			});
+		}
+		// The block is validated as a subtree whose root is the parent itself:
+		// the caps (depth / node budget / summary / beat) then count against
+		// the WHOLE chain, not just the new chunk. The wrapper is never
+		// persisted — only `draft.children` attach.
+		const blockParse = parseDraft(
+			{ id: parentId, label: parent.label, kind: parent.kind, file: parent.location.file ?? '', summary: parent.summary, children: input.children },
+			parentId,
+		);
+		if (!blockParse.draft) return failText(reply, 'ExtendCodeChainNode children must be valid draft nodes {id,label,kind,file,summary}');
+		const { draft, warnings, narrative: validatedNarrative } = validateDraft(blockParse.draft, asString(input.narrative) ?? undefined);
+		const children = draft.children ?? [];
+		const dropped: { id: string; reason: string }[] = blockParse.dropped.map((where) => ({
+			id: where,
+			reason: `dropped \`${where}\` — missing/invalid id, label, or kind (see the tool schema)`,
+		}));
+
+		// Per-call memoization (mirrors resolveChain's own caches, which never
+		// cross calls): a wedged provider cannot poison later calls, and a
+		// chunk touching one file pays a single round-trip per symbol.
+		const fileCache = new Map<string, string>();
+		const symbolCache = new Map<string, Promise<{ location: ChainLocation; reason?: string }>>();
+		const failures: { id: string; reason: string }[] = [];
+
+		const resolveFile = async (file: string): Promise<string> => {
+			let hit = fileCache.get(file);
+			if (hit === undefined) {
+				const resolved = await resolveFileUri(this.deps.workspace, file);
+				hit = resolved.uri ?? `ERR ${resolved.reason ?? 'unresolvable file'}`;
+				fileCache.set(file, hit);
+			}
+			return hit;
+		};
+		const cachedResolve = (uri: string, symbol: string | undefined, kind: ChainNodeDraft['kind']) => {
+			const key = `${uri}#${symbol ?? ''}#${kind}`;
+			let hit = symbolCache.get(key);
+			if (!hit) {
+				hit = resolveSymbol(this.deps.lsp, uri, symbol, kind);
+				symbolCache.set(key, hit);
+			}
+			return hit;
+		};
+		const resolveDraft = async (node: ChainNodeDraft, depth: number): Promise<ResolvedNode> => {
+			let location: ChainLocation;
+			if (!node.file || node.file.trim() === '') {
+				location = node.kind === 'note'
+					? { uri: '', resolveStatus: 'ok' }
+					: { uri: '', resolveStatus: 'unresolved' };
+				if (node.kind !== 'note') failures.push({ id: node.id, reason: 'missing `file`' });
+			} else {
+				const fileHit = await resolveFile(node.file);
+				if (fileHit.startsWith('ERR ')) {
+					location = { uri: '', resolveStatus: 'unresolved' };
+					failures.push({ id: node.id, reason: fileHit.slice(4) });
+				} else {
+					const hit = await cachedResolve(fileHit, node.symbol, node.kind);
+					location = hit.location;
+					if (hit.reason) failures.push({ id: node.id, reason: hit.reason });
+				}
+			}
+			// Defensive re-check of the whole-chain caps: validateDraft already
+			// enforces them, but the budget here counts the EXISTING chain,
+			// and a node at the ceiling must never slip through and blow the
+			// panel's ≤48-node scaling envelope.
+			const overDepth = depth + 1 > MAX_CHAIN_DEPTH;
+			const overBudget = countNodes(chain.root) + this.countDraftTree(node) > MAX_CHAIN_NODES;
+			const children =
+				overDepth || overBudget
+					? []
+					: await Promise.all((node.children ?? []).map((child) => resolveDraft(child, depth + 1)));
+			if (overDepth) warnings.push(`${node.id}: children dropped — chain exceeds ${MAX_CHAIN_DEPTH} levels`);
+			if (overBudget) warnings.push(`${node.id}: children dropped — chain exceeds ${MAX_CHAIN_NODES} nodes`);
+			return {
+				id: node.id,
+				label: node.label,
+				kind: node.kind,
+				summary: node.summary,
+				edgeNote: node.edgeNote,
+				beat: node.beat,
+				provenance: 'llm',
+				location: { ...location, ...(node.file ? { file: node.file } : {}) },
+				children,
+			};
+		};
+
+		const resolvedChildren = await Promise.all(children.map((child) => resolveDraft(child, parentDepth(chain.root, parentId))));
+		if (dropped.length > 0) failures.unshift(...dropped);
+		// Self-correction state is keyed by the iteration unit: the model
+		// retries ONE parent's block, so attempts accumulate per
+		// session + chain + parent (mirrors Gen's session + rootId key).
+		const key = `${call.sessionId}:${chain.chainId}:${parentId}`;
+		if (failures.length > 0) {
+			const attempts = (this.correctionAttempts.get(key) ?? 0) + 1;
+			this.correctionAttempts.set(key, attempts);
+			if (attempts <= MAX_CORRECTION_ROUNDS) {
+				return fail(reply, {
+					ok: false,
+					attempt: attempts,
+					maxAttempts: MAX_CORRECTION_ROUNDS + 1,
+					failures: failures.map((f) => ({ nodeId: f.id, reason: f.reason })),
+					hint: 'Fix ONLY the listed nodes (file/symbol you have actually read) and call client_ExtendCodeChainNode again with the whole block.',
+				});
+			}
+			this.correctionAttempts.delete(key);
+		} else {
+			this.correctionAttempts.delete(key);
+		}
+
+		const next = withStats({
+			...chain,
+			root: replaceNode(chain.root, parentId, (node) => ({ ...node, children: [...node.children, ...resolvedChildren] })).root,
+			...(validatedNarrative !== undefined ? { narrative: validatedNarrative } : {}),
+		});
+		this.store.save(next);
+		this.sinks.updateChain(next);
+		return ok(reply, {
+			ok: true,
+			chainId: next.chainId,
+			added: resolvedChildren.map((n) => n.id),
+			nodeCount: next.stats.nodeCount,
+			unresolvedCount: next.stats.unresolvedCount,
+			...(failures.length > 0
+				? { note: `${failures.length} node(s) stayed unresolved after ${MAX_CORRECTION_ROUNDS} correction rounds; they render as warnings` }
+				: {}),
+			...(warnings.length > 0 ? { warnings } : {}),
+		});
+	}
+
+	/** Node count of a draft tree (cap re-check side of the extend path). */
+	private countDraftTree(node: ChainNodeDraft): number {
+		return 1 + (node.children ?? []).reduce((sum, c) => sum + this.countDraftTree(c), 0);
 	}
 
 	// ── ExpandCodeChainNode ─────────────────────────────────────────────────
@@ -532,6 +796,7 @@ function parseDraft(raw: unknown, path: string): { draft: ChainNodeDraft | null;
 		...(asString(node.symbol) !== null ? { symbol: asString(node.symbol) as string } : {}),
 		summary,
 		...(asString(node.edgeNote) !== null ? { edgeNote: asString(node.edgeNote) as string } : {}),
+		...(asString(node.beat) !== null ? { beat: asString(node.beat) as string } : {}),
 		children,
 	};
 	return { draft, dropped };
@@ -546,6 +811,23 @@ export function findNode(root: ResolvedNode, id: string): ResolvedNode | null {
 		if (hit) return hit;
 	}
 	return null;
+}
+
+/** The 1-based level of `id` in a resolved tree (root = 1); 0 when absent.
+ * Extend resolves its new nodes with this as the parent depth, so the §3
+ * depth cap counts the WHOLE chain (seed + earlier chunks), not just the
+ * current chunk — `validateDraft` alone can only count the chunk relative
+ * to its synthetic wrapper. */
+function parentDepth(root: ResolvedNode, id: string): number {
+	const walk = (node: ResolvedNode, depth: number): number => {
+		if (node.id === id) return depth;
+		for (const child of node.children) {
+			const hit = walk(child, depth + 1);
+			if (hit > 0) return hit;
+		}
+		return 0;
+	};
+	return walk(root, 1);
 }
 
 export function* flatten(root: ResolvedNode): Generator<ResolvedNode> {
