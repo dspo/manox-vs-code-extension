@@ -105,7 +105,8 @@
         }
       ]
     },
-    "stats": { "nodeCount": 7, "unresolvedCount": 1 }
+    "stats": { "nodeCount": 7, "unresolvedCount": 1 },
+    "narrative": "用户发起下单后，系统先进行**库存校验**，通过则扣减并落库，最终发出领域事件广播，失败则整体事务回滚。"
   },
   "resolve": {
     "workspaceFolders": ["/repo"],

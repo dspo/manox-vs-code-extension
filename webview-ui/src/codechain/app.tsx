@@ -3,7 +3,7 @@
 // session-list precedent (`renderNodes` in components/session-list.tsx) —
 // collapsed subtrees drop out of `flattenVisible`, indentation guides are
 // per-level left borders, status is CSS classes. No graph library, no
-// canvas; at ≤80 nodes that is the repo's own scaling envelope (§6.1).
+// canvas; at ≤48 nodes that is the repo's own scaling envelope (§6.1).
 //
 // State discipline: the panel holds ONLY view state (selection, collapse,
 // toast). Chain data arrives whole from the host via `{t:'chain'}`; tour
@@ -15,6 +15,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChainKind, CodeChain, ResolvedNode } from '../../../src/codechain/types';
 import { cn } from '../sidebar/webview/lib/utils';
 import { t } from '../shared/i18n';
+import { MarkdownContent } from '../shared/markdown-content';
 import type { PanelBridge } from './bridge';
 import { allNodeIds, flattenVisible, locationLabel } from './tree';
 
@@ -125,6 +126,9 @@ const TreeRow = ({
             </span>
           )}
         </span>
+        {node.beat && (
+          <span className="text-muted-foreground/80 block truncate text-[10px]">{node.beat}</span>
+        )}
         {node.summary && (
           <span className="text-muted-foreground block truncate text-[11px]">{node.summary}</span>
         )}
@@ -191,17 +195,30 @@ const DetailPane = ({
         </button>
       </div>
       <div className="px-4 py-3">
+        {chain.narrative && (
+          <div className="mb-3 border-b border-border pb-3">
+            <div className="text-muted-foreground mb-1 text-[10px] font-semibold uppercase tracking-wide">
+              {t('cc_narrative')}
+            </div>
+            <MarkdownContent content={chain.narrative} className="text-foreground/90 text-[13px]" />
+          </div>
+        )}
+        {node.beat && (
+          <div className="text-muted-foreground mb-1 truncate text-xs">◆ {node.beat}</div>
+        )}
         {node.edgeNote && (
           <div className="text-muted-foreground mb-2 border-l-2 border-info/40 pl-2 text-xs">
             {t('cc_edge')} · {node.edgeNote}
           </div>
         )}
-        {/* Summary renders as plain text (whitespace preserved), NOT markdown:
-         * it is LLM-authored prose the model writes about the user's code, so
-         * the safer literal rendering is a deliberate downgrade from §6.2's
-         * markdown note (review #14) — no need to pull the ReactMarkdown/
-         * sanitize graph into the panel bundle for a single field. */}
-        <p className="text-sm leading-relaxed whitespace-pre-wrap">{node.summary}</p>
+        {/* narrative / summary are model-authored markdown; sanitization is
+         * handled by MarkdownContent (react-markdown + rehype-sanitize, the
+         * shared precedent of the transcript components). The old review #14
+         * plain-text downgrade only existed because pulling the markdown
+         * graph into the panel bundle was cost for a single field — the
+         * narrative block needs it anyway, and progressive Extend now makes
+         * summaries markdown routinely. */}
+        <MarkdownContent content={node.summary} className="text-sm leading-relaxed" />
         {node.location.resolveStatus === 'ambiguous' && (node.location.candidates?.length ?? 0) > 0 && (
           <div className="mt-3">
             <div className="text-warning mb-1 text-xs font-medium">{t('cc_candidates')}</div>
