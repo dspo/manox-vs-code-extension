@@ -64,6 +64,18 @@ Key invariants (from the manox architecture doc, `docs/dsh-v2-architecture.md`):
   the only remaining flock is the WS gateway lease, and contention there is
   a loud no-op, never an exit). The agent still starts lazily (first use),
   never at activation.
+- **The webview self-heals a stale host→webview channel.**
+  `retainContextWhenHidden` lets a graceful extension-host restart (e.g. an
+  install) leave the retained iframe deaf: the new relay posts frames the
+  window never delivers, freezing the store on pre-restart state. A
+  heartbeat watchdog (`webview-ui/…/state/watchdog.ts`) pings
+  `{t:'ping', seq}` every 5 s and treats ANY host message — pong echoes
+  included — as liveness; after ~3 unanswered pings of silence it declares
+  the channel stale and reloads the iframe (visible only; a hidden view
+  defers the verdict to `visibilitychange`). The heartbeat is sidebar
+  out-of-band envelope vocabulary, never protocol — the host answers pings
+  without touching the agent relay, and a healthy boot re-push also
+  refetches the registries without a reload at all.
 
 ## The native binding
 

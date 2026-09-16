@@ -28,11 +28,14 @@ import type { FromClient, FromServer } from '../protocol/types';
 
 /** Webview → host messages: raw protocol frames plus diagnostics. The
  * `viewing` verb is retained as a shield registration for compatibility;
- * `openCodeChain` reopens a stored chain from its journal card (§7). */
+ * `openCodeChain` reopens a stored chain from its journal card (§7); `ping`
+ * is the webview watchdog's channel heartbeat, answered with a `pong` —
+ * pure out-of-band, it never enters the frame relay. */
 export type ToHost =
 	| { t: 'frame'; frame: FromClient }
 	| { t: 'viewing'; sessionId: string | null }
 	| { t: 'openCodeChain'; chainId: string }
+	| { t: 'ping'; seq: number }
 	| { t: 'log'; level: 'info' | 'warn' | 'error'; message: string };
 
 /** Host → webview messages: raw protocol frames plus host state pushes.
@@ -40,7 +43,9 @@ export type ToHost =
  * invocation by THIS host has no webview-visible side effect otherwise);
  * `compose` backfills the composer with a `/codechain …` question (§10
  * read-only reopen path); it carries the originating sessionId so the
- * composer can verify it belongs to the thread on screen (review #16). */
+ * composer can verify it belongs to the thread on screen (review #16);
+ * `pong` echoes a watchdog `ping`'s seq — the heartbeat reply proving the
+ * host→webview postMessage channel still delivers. */
 export type ToWebview =
 	| { t: 'frame'; frame: FromServer }
 	| { t: 'verb'; kind: 'new_session' | 'open_turn_navigator' }
@@ -48,6 +53,7 @@ export type ToWebview =
 	| { t: 'verb'; kind: 'compose'; text: string; sessionId: string }
 	| { t: 'config'; approvalMode: string }
 	| { t: 'boot'; cwd: string; approvalMode: string }
+	| { t: 'pong'; seq: number }
 	| { t: 'fatal'; message: string };
 
 let activeProvider: ManoxSidebarProvider | null = null;
@@ -161,6 +167,14 @@ class ManoxSidebarProvider implements vscode.WebviewViewProvider {
 				return;
 			case 'log':
 				console[msg.level](`manox webview: ${msg.message}`);
+				return;
+			case 'ping':
+				// Watchdog heartbeat (webview `state/watchdog.ts`): echo the
+				// seq. The reply travels the SAME host→webview postMessage
+				// channel whose liveness is in question, which is the point
+				// — a stale retained-context iframe never sees the pong and
+				// reloads itself. Nothing is relayed to the agent here.
+				this.post({ t: 'pong', seq: msg.seq });
 				return;
 			case 'frame': {
 				this.trackStream(msg.frame);

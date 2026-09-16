@@ -9,10 +9,15 @@
 
 import type { FromClient, FromServer } from '../protocol';
 
-/** Outbound webview → host: a typed `FromClient`, or the code-chain card
+/** Outbound webview → host: a typed `FromClient`, the code-chain card
  * click asking the host to reopen a stored chain (no wire equivalent —
- * chains live in the host's workspaceState, §7). */
-export type ToHost = FromClient | { t: 'openCodeChain'; chainId: string };
+ * chains live in the host's workspaceState, §7), or the watchdog's
+ * channel heartbeat `ping` (answered with a `pong` on the host side;
+ * pure out-of-band, never a wire frame). */
+export type ToHost =
+	| FromClient
+	| { t: 'openCodeChain'; chainId: string }
+	| { t: 'ping'; seq: number };
 
 /** Host → webview out-of-band UI note (not from the agent):
  * `open_turn_navigator` is the macOS cmd+m path (the OS minimize
