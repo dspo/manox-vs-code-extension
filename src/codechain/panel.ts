@@ -18,7 +18,7 @@
 //
 // The panel is a dumb view over the store: every FromPanel interaction is
 // answered either locally (candidate pick) or by re-invoking the tool path
-// (`refresh` rides `RefreshCodeChain` through `CodeChainTools.handle`, so
+// (`refresh` rides `TOOL_NAMES.refresh` through `CodeChainTools.handle`, so
 // the reply contract has exactly one implementation shared with the LLM).
 
 import * as vscode from 'vscode';
@@ -28,7 +28,7 @@ import type { ChainNavigation } from './navigation';
 import { renderPanelHtml } from './panelHtml';
 import { stepTour, tourOrder } from './tour';
 import type { FromPanel, CodeChain, ResolvedNode, ToPanel } from './types';
-import { findNode, type CodeChainTools } from './tools';
+import { findNode, TOOL_NAMES, type CodeChainTools } from './tools';
 
 const PANEL_VIEW_TYPE = 'manox.codeChain';
 
@@ -102,7 +102,7 @@ export class CodeChainPanel {
 		if (!this.chain) return;
 		const chainId = this.chain.chainId;
 		this.tools().handle(
-			{ sessionId: this.chain.sessionId, name: 'RefreshCodeChain', input: { chainId } },
+			{ sessionId: this.chain.sessionId, name: TOOL_NAMES.refresh, input: { chainId } },
 			{
 				ok: (content) => this.post({ t: 'toast', message: summarizeRefresh(content) }),
 				err: (message) => this.sinks.log(`refresh failed: ${message}`),
@@ -113,7 +113,7 @@ export class CodeChainPanel {
 	private create(): void {
 		const webviewPanel = vscode.window.createWebviewPanel(
 			PANEL_VIEW_TYPE,
-			'Code Chain',
+			'Code Tutor',
 			{ viewColumn: vscode.ViewColumn.Active, preserveFocus: true },
 			{
 				enableScripts: true,
@@ -224,7 +224,7 @@ export class CodeChainPanel {
 					this.sinks.log('regen dropped: no owning session for the open chain');
 					return;
 				}
-				this.sinks.compose(`/codechain ${msg.question}`, this.chain.sessionId);
+				this.sinks.compose(`/tutor ${msg.question}`, this.chain.sessionId);
 				return;
 			case 'log':
 				this.sinks.log(`panel[${msg.level}]: ${msg.message}`);

@@ -143,11 +143,11 @@ code --install-extension manox-vscode-*.vsix --force
 | Setting | Default | Meaning |
 |---|---|---|
 | `manox.sdkRoot` | *(unset)* | Directory containing `manox_napi.node`. |
-| `manox.stateRoot` | `~/.manox` | `MANOX_HOME` for the embedded runtime — shared with the desktop app by default so threads/models/provider config are one surface; set a separate directory to isolate. An externally preset `MANOX_HOME` env var wins over this setting — the `/codechain` command provisions into the env root to match. |
+| `manox.stateRoot` | `~/.manox` | `MANOX_HOME` for the embedded runtime — shared with the desktop app by default so threads/models/provider config are one surface; set a separate directory to isolate. An externally preset `MANOX_HOME` env var wins over this setting — the `/tutor` command provisions into the env root to match. |
 | `manox.approvalMode` | `workspace-write` | Tool-authorization policy seeded into new sessions (`read-only` / `workspace-write` / `danger-full-access`). |
 
 Commands: `manox: Focus Chat`, `manox: New Session`, `manox: Open Code
-Chain` (tour steps are `alt+left`/`alt+right` scoped to
+Tutor` (tour steps are `alt+left`/`alt+right` scoped to
 `activeWebviewPanelId == manox.codeChain`, so they never steal the
 workbench back/forward nav).
 The sidebar header also
@@ -206,29 +206,33 @@ lock-step with the Rust `manox-protocol` crate (protocol epoch 6):
   `vscode.env.openExternal`; the agent's Open tool is approval-gated
   upstream) before any per-session routing, so they never surface as
   webview cards. `clientTool` is now live: the host registers the
-  GenCodeChain tool set (`registerSessionTools`) and answers
+  Code Tutor tool set (`registerSessionTools`) and answers
   `invokeClientTool` from the interceptor (see below).
-- GenCodeChain (`src/codechain/`): the LLM generates an LSP-verified
-  code-reading tour rendered in an editor-area webview panel. Seven
-  client tools (`GenCodeChain` / `NarrateCodeChain` /
-  `ExtendCodeChainNode` / `AddCodeChainNode` /
-  `ExpandCodeChainNode` / `AnnotateCodeChainNode` /
-  `RefreshCodeChain`, all `read_only`) drive
-  it. The business flow is built progressively so no single tool reply
+- Code Tutor (`src/codechain/`): the LLM generates an LSP-verified
+  code-reading tour rendered in an editor-area webview panel (model-
+  facing tools carry the `client_` prefix the server adds; the bare
+  names are `TutorEntry` / `TutorNarrate` /
+  `TutorExtend` / `TutorAdd` /
+  `TutorExpand` / `TutorAnnotate` /
+  `TutorRefresh`, all `read_only`, seven in total and defined once in
+  the `TOOL_NAMES` constants). The business flow is built progressively
+  so no single tool reply
   overruns the model's output budget. The default path is node-by-node:
-  `AddCodeChainNode` appends exactly ONE node per call (a ~300-char tool
+  `TutorAdd` appends exactly ONE node per call (a ~300-char tool
   JSON), which is the only shape a small-output-budget model — e.g.
   qwen3.8-flash through Bailian, ~2K output tokens shared across
   thinking/text/tool JSON, whose calls truncated mid-JSON even at a
   ≤8-node shard, the cut point tracking the budget down (5334 → 3251
-  chars) — can reliably emit; `GenCodeChain` (whole spine) and
-  `ExtendCodeChainNode` (a ≤8-node block) remain large-budget shortcuts.
-  `NarrateCodeChain` commits the chain's business story as its own
+  chars) — can reliably emit; `TutorEntry` (whole spine) and
+  `TutorExtend` (a ≤8-node block) remain large-budget shortcuts.
+  `TutorNarrate` commits the chain's business story as its own
   call (a narrative + tree in one payload blew a ~5KB budget and cut the
   stream mid-JSON on a real model). Symbol positions resolve through the `vscode.execute*Provider`
   commands, so a hallucinated location is rejected back to the model.
-  `/codechain` is a harness slash command provisioned into
-  `<MANOX_HOME>/commands/codechain.md` at activation. The full invoke
+  `/tutor` is a harness slash command provisioned into
+  `<MANOX_HOME>/commands/tutor.md` at activation (the legacy
+  `codechain.md` from the pre-Tutor brand is removed on write, so an
+  upgraded install never keeps a stale `/codechain`). The full invoke
   round-trip depends on the dspo/manox side (the napi ClientTool
   capability + read_only approval-gate fix); until that lands and the
   addon is restaged, registration succeeds but real tool calls fail

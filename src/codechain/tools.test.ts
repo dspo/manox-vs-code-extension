@@ -1,8 +1,8 @@
 // The seven client tools' reply contract + self-correction loop (§4, §9.3)
 // over the FakeLsp fixture: every business outcome answers `reply.ok
 // {content, isError}` — never an RPC Err — so the model reads the structured
-// feedback; a successful GenCodeChain publishes (store + panel + journal
-// verb); the narrative rides its own NarrateCodeChain call (never the seed);
+// feedback; a successful TutorEntry publishes (store + panel + journal
+// verb); the narrative rides its own TutorNarrate call (never the seed);
 // bare and `client_`-prefixed names both route.
 
 import { describe, expect, it } from 'vitest';
@@ -11,7 +11,7 @@ import fixtures from '../../test-fixtures/codechain-cases.json';
 import { ChainStore, type ChainStoreSink } from './chainStore';
 import type { CodeChain, ChainNodeDraft } from './types';
 import type { LspClient, LspItem, LspLocation, LspSymbol, ResolveDeps, WorkspaceView } from './resolve';
-import { CodeChainTools, clientToolSpecs, type InvokeCall, type ReplySinks, type ToolSinks } from './tools';
+import { CodeChainTools, clientToolSpecs, TOOL_NAMES, type InvokeCall, type ReplySinks, type ToolSinks } from './tools';
 
 const symbolsByUri = fixtures.resolve.symbols as Record<string, LspSymbol[]>;
 const existingFiles = new Set(fixtures.resolve.existingFiles as string[]);
@@ -122,74 +122,74 @@ describe('client tool specs', () => {
 	it('register all seven, read-only, snake_case-ready', () => {
 		const specs = clientToolSpecs();
 		expect(specs.map((s) => s.name)).toEqual([
-			'GenCodeChain',
-			'NarrateCodeChain',
-			'ExtendCodeChainNode',
-			'AddCodeChainNode',
-			'ExpandCodeChainNode',
-			'AnnotateCodeChainNode',
-			'RefreshCodeChain',
+			TOOL_NAMES.entry,
+			TOOL_NAMES.narrate,
+			TOOL_NAMES.extend,
+			TOOL_NAMES.add,
+			TOOL_NAMES.expand,
+			TOOL_NAMES.annotate,
+			TOOL_NAMES.refresh,
 		]);
 		expect(specs.every((s) => s.readOnly === true)).toBe(true);
 		// Cross-references between tools use the model-facing prefixed names
 		// (§8 Phase 0 revision): the model never sees the bare registration
 		// name, so the descriptions must not reference it either. The
-		// progressive chain-building path (Gen ↔ Add ↔ Extend → Narrate) must
+		// progressive chain-building path (entry ↔ add ↔ extend → narrate, per TOOL_NAMES) must
 		// point at each other, and the semantics pair (Expand ↔ Annotate ↔
 		// Extend) too.
-		expect(specs[0]?.description).toContain('client_ExtendCodeChainNode');
+		expect(specs[0]?.description).toContain(`client_${TOOL_NAMES.extend}`);
 		// The seed no longer carries the story — it must send the model to the
 		// dedicated narrative tool instead.
-		expect(specs[0]?.description).toContain('client_NarrateCodeChain');
+		expect(specs[0]?.description).toContain(`client_${TOOL_NAMES.narrate}`);
 		// The default build path is node-by-node: Gen's whole-tree seed is
 		// demoted to a large-budget shortcut and points the model at Add.
-		expect(specs[0]?.description).toContain('client_AddCodeChainNode');
+		expect(specs[0]?.description).toContain(`client_${TOOL_NAMES.add}`);
 		// The seed schema dropped the top-level narrative field entirely (the
 		// word still appears inside a node `beat` description — check the shape,
 		// not the string).
 		const genSchema = specs[0]?.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
 		expect(genSchema.properties?.narrative).toBeUndefined();
 		expect(genSchema.required ?? []).not.toContain('narrative');
-		expect(specs[1]?.description).toContain('client_GenCodeChain');
-		expect(specs[2]?.description).toContain('client_GenCodeChain');
+		expect(specs[1]?.description).toContain(`client_${TOOL_NAMES.entry}`);
+		expect(specs[2]?.description).toContain(`client_${TOOL_NAMES.entry}`);
 		// Add (index 3) is the default one-node-per-call path and must
 		// cross-reference the whole-tree tools it replaces + the narrator it
 		// hands off to.
 		expect(specs[3]?.description).toContain('ONE node');
-		expect(specs[3]?.description).toContain('client_GenCodeChain');
-		expect(specs[3]?.description).toContain('client_ExtendCodeChainNode');
-		expect(specs[3]?.description).toContain('client_NarrateCodeChain');
-		expect(specs[4]?.description).toContain('client_AnnotateCodeChainNode');
-		expect(specs[4]?.description).toContain('client_ExtendCodeChainNode');
-		expect(specs[5]?.description).toContain('client_ExpandCodeChainNode');
-		expect(specs[5]?.description).toContain('client_ExtendCodeChainNode');
+		expect(specs[3]?.description).toContain(`client_${TOOL_NAMES.entry}`);
+		expect(specs[3]?.description).toContain(`client_${TOOL_NAMES.extend}`);
+		expect(specs[3]?.description).toContain(`client_${TOOL_NAMES.narrate}`);
+		expect(specs[4]?.description).toContain(`client_${TOOL_NAMES.annotate}`);
+		expect(specs[4]?.description).toContain(`client_${TOOL_NAMES.extend}`);
+		expect(specs[5]?.description).toContain(`client_${TOOL_NAMES.expand}`);
+		expect(specs[5]?.description).toContain(`client_${TOOL_NAMES.extend}`);
 		for (const spec of specs) {
 			// A bare (unprefixed) tool name would be a name the model can
 			// never call — reject it in every description.
-			expect(spec.description).not.toMatch(/(^|[^_A-Za-z])(GenCodeChain|NarrateCodeChain|ExtendCodeChainNode|AddCodeChainNode|ExpandCodeChainNode|AnnotateCodeChainNode|RefreshCodeChain)(?!_)/);
+			expect(spec.description).not.toMatch(new RegExp(`(^|[^_A-Za-z])(${Object.values(TOOL_NAMES).join('|')})(?!_)`));
 		}
 	});
 });
 
-describe('GenCodeChain', () => {
+describe('TutorEntry (chain seed)', () => {
 	it('a fully-resolved tree publishes store + panel + journal verb', async () => {
 		const { tools, store, shown, verbs, reply } = makeTools();
 		const r = reply();
-		const handled = await tools.handle(call('GenCodeChain', { title: '流程', question: 'q', root: okRoot }), r.sinks);
+		const handled = await tools.handle(call(TOOL_NAMES.entry, { title: '流程', question: 'q', root: okRoot }), r.sinks);
 		expect(handled).toBe(true);
 		const out = r.calls[0];
 		expect(out?.err).toBeUndefined();
 		expect(out?.isError).toBe(false);
-		expect(parsed(out?.content)).toMatchObject({ ok: true, chainId: 'cc-1', nodeCount: 1, unresolvedCount: 0, nextStep: expect.stringContaining('client_NarrateCodeChain') });
+		expect(parsed(out?.content)).toMatchObject({ ok: true, chainId: 'cc-1', nodeCount: 1, unresolvedCount: 0, nextStep: expect.stringContaining(`client_${TOOL_NAMES.narrate}`) });
 		expect(store.get('cc-1')?.title).toBe('流程');
 		expect(shown).toHaveLength(1);
 		expect(verbs[0]).toMatchObject({ sessionId: 's1', chainId: 'cc-1', nodeCount: 1 });
 	});
 
-	it('routes the prefixed `client_GenCodeChain` name identically (§9.2)', async () => {
+	it('routes the prefixed `client_TutorEntry` name identically (§9.2)', async () => {
 		const { tools, reply } = makeTools();
 		const r = reply();
-		const handled = await tools.handle(call('client_GenCodeChain', { title: 't', question: 'q', root: okRoot }), r.sinks);
+		const handled = await tools.handle(call(`client_${TOOL_NAMES.entry}`, { title: 't', question: 'q', root: okRoot }), r.sinks);
 		expect(handled).toBe(true);
 		expect(r.calls[0]?.isError).toBe(false);
 	});
@@ -198,7 +198,7 @@ describe('GenCodeChain', () => {
 		const { tools, shown, reply } = makeTools();
 		const r = reply();
 		await tools.handle(
-			call('GenCodeChain', { title: 't', question: 'q', root: { ...okRoot, children: [failingChild] } }),
+			call(TOOL_NAMES.entry, { title: 't', question: 'q', root: { ...okRoot, children: [failingChild] } }),
 			r.sinks,
 		);
 		const out = r.calls[0];
@@ -214,7 +214,7 @@ describe('GenCodeChain', () => {
 		const root = { ...okRoot, children: [failingChild] };
 		for (let i = 0; i < 4; i += 1) {
 			const r = reply();
-			await tools.handle(call('GenCodeChain', { title: 't', question: 'q', root }), r.sinks);
+			await tools.handle(call(TOOL_NAMES.entry, { title: 't', question: 'q', root }), r.sinks);
 			if (i < 3) expect(r.calls[0]?.isError).toBe(true);
 		}
 		// The 4th attempt (rounds exhausted) publishes with an unresolved note.
@@ -225,7 +225,7 @@ describe('GenCodeChain', () => {
 	it('a malformed draft answers isError without resolving', async () => {
 		const { tools, reply } = makeTools();
 		const r = reply();
-		await tools.handle(call('GenCodeChain', { title: 't', root: { id: 'x' } }), r.sinks);
+		await tools.handle(call(TOOL_NAMES.entry, { title: 't', root: { id: 'x' } }), r.sinks);
 		expect(r.calls[0]?.isError).toBe(true);
 		expect(r.calls[0]?.content).toContain('requires');
 	});
@@ -237,7 +237,7 @@ describe('GenCodeChain', () => {
 		const { tools, shown, reply } = makeTools();
 		const r = reply();
 		await tools.handle(
-			call('GenCodeChain', { title: 't', question: 'q', root: { ...okRoot, summary: 's'.repeat(3_400) } }),
+			call(TOOL_NAMES.entry, { title: 't', question: 'q', root: { ...okRoot, summary: 's'.repeat(3_400) } }),
 			r.sinks,
 		);
 		expect(r.calls[0]?.isError).toBe(true);
@@ -246,11 +246,11 @@ describe('GenCodeChain', () => {
 		expect(shown).toHaveLength(0);
 	});
 
-	it('rejects a stray `narrative` field and routes the model to client_NarrateCodeChain', async () => {
+	it('rejects a stray `narrative` field and routes the model to client_TutorNarrate', async () => {
 		const { tools, shown, store, reply } = makeTools();
 		const r = reply();
 		await tools.handle(
-			call('GenCodeChain', {
+			call(TOOL_NAMES.entry, {
 				title: 't',
 				question: 'q',
 				narrative: '用户发起下单，系统先校验库存再落库广播。',
@@ -259,7 +259,7 @@ describe('GenCodeChain', () => {
 			r.sinks,
 		);
 		expect(r.calls[0]?.isError).toBe(true);
-		expect(r.calls[0]?.content).toContain('client_NarrateCodeChain');
+		expect(r.calls[0]?.content).toContain(`client_${TOOL_NAMES.narrate}`);
 		// Rejected before resolving: nothing published.
 		expect(shown).toHaveLength(0);
 		expect(store.get('cc-1')).toBeUndefined();
@@ -268,22 +268,22 @@ describe('GenCodeChain', () => {
 	it('seeds the spine with NO narrative — the field stays off the chain (split flow)', async () => {
 		const { tools, store, reply } = makeTools();
 		const r = reply();
-		await tools.handle(call('GenCodeChain', { title: 't', question: 'q', root: okRoot }), r.sinks);
+		await tools.handle(call(TOOL_NAMES.entry, { title: 't', question: 'q', root: okRoot }), r.sinks);
 		expect(r.calls[0]?.isError).toBe(false);
 		expect('narrative' in (store.get('cc-1') ?? {})).toBe(false);
 	});
 });
 
 // The business story is its own call (the real-model fix: a narrative + tree
-// in one GenCodeChain reply blew the ~5KB output budget mid-JSON). Narrate
+// in one entry-tool reply blew the ~5KB output budget mid-JSON). Narrate
 // runs no resolution — it just sets `chain.narrative`, re-saves, and re-pushes
 // the open panel; over-cap stories truncate with a warning, an oversized
 // payload is refused with a compress-to-cap instruction.
-describe('NarrateCodeChain', () => {
+describe('TutorNarrate', () => {
 	async function genOk() {
 		const t = makeTools();
 		const r = t.reply();
-		await t.tools.handle(call('GenCodeChain', { title: 't', question: 'q', root: okRoot }), r.sinks);
+		await t.tools.handle(call(TOOL_NAMES.entry, { title: 't', question: 'q', root: okRoot }), r.sinks);
 		expect(r.calls[0]?.isError).toBe(false);
 		return t;
 	}
@@ -292,7 +292,7 @@ describe('NarrateCodeChain', () => {
 		const t = await genOk();
 		const r = t.reply();
 		await t.tools.handle(
-			call('client_NarrateCodeChain', { chainId: 'cc-1', narrative: '用户发起下单，系统先校验库存再落库广播。' }),
+			call(`client_${TOOL_NAMES.narrate}`, { chainId: 'cc-1', narrative: '用户发起下单，系统先校验库存再落库广播。' }),
 			r.sinks,
 		);
 		expect(r.calls[0]?.isError).toBe(false);
@@ -308,7 +308,7 @@ describe('NarrateCodeChain', () => {
 		const t = await genOk();
 		const r = t.reply();
 		await t.tools.handle(
-			call('NarrateCodeChain', { chainId: 'cc-1', narrative: 'x'.repeat(1_500) }),
+			call(TOOL_NAMES.narrate, { chainId: 'cc-1', narrative: 'x'.repeat(1_500) }),
 			r.sinks,
 		);
 		expect(r.calls[0]?.isError).toBe(false);
@@ -325,7 +325,7 @@ describe('NarrateCodeChain', () => {
 		// overhead), past the headroom guard even though it is inside 1200… no,
 		// it is over 1200 too — the guard fires FIRST, before truncation.
 		await t.tools.handle(
-			call('NarrateCodeChain', { chainId: 'cc-1', narrative: 'y'.repeat(1_990) }),
+			call(TOOL_NAMES.narrate, { chainId: 'cc-1', narrative: 'y'.repeat(1_990) }),
 			r.sinks,
 		);
 		expect(r.calls[0]?.isError).toBe(true);
@@ -340,7 +340,7 @@ describe('NarrateCodeChain', () => {
 	it('missing chainId answers without hanging (review #5)', async () => {
 		const { tools, reply } = makeTools();
 		const r = reply();
-		const handled = await tools.handle(call('NarrateCodeChain', { narrative: '故事' }), r.sinks);
+		const handled = await tools.handle(call(TOOL_NAMES.narrate, { narrative: '故事' }), r.sinks);
 		expect(handled).toBe(true);
 		expect(r.calls).toHaveLength(1);
 		expect(r.calls[0]?.isError).toBe(true);
@@ -350,17 +350,17 @@ describe('NarrateCodeChain', () => {
 	it('an empty narrative answers isError', async () => {
 		const t = await genOk();
 		const r = t.reply();
-		await t.tools.handle(call('NarrateCodeChain', { chainId: 'cc-1', narrative: '   ' }), r.sinks);
+		await t.tools.handle(call(TOOL_NAMES.narrate, { chainId: 'cc-1', narrative: '   ' }), r.sinks);
 		expect(r.calls[0]?.isError).toBe(true);
 		expect(r.calls[0]?.content).toContain('narrative');
 	});
 });
 
-// Progressive chain building (§ plan): ExtendCodeChainNode attaches a ≤8-node
+// Progressive chain building (§ plan): TutorExtend attaches a ≤8-node
 // block under an existing parent, reusing the self-correction gate; the
 // payload guards turn an oversized draft into an actionable re-shard
 // instruction instead of a silent transport failure.
-describe('ExtendCodeChainNode', () => {
+describe('TutorExtend', () => {
 	const okChild: ChainNodeDraft = {
 		id: 'service.create',
 		label: 'create',
@@ -374,7 +374,7 @@ describe('ExtendCodeChainNode', () => {
 	async function genOk() {
 		const t = makeTools();
 		const r = t.reply();
-		await t.tools.handle(call('GenCodeChain', { title: 't', question: 'q', root: okRoot }), r.sinks);
+		await t.tools.handle(call(TOOL_NAMES.entry, { title: 't', question: 'q', root: okRoot }), r.sinks);
 		expect(r.calls[0]?.isError).toBe(false);
 		return t;
 	}
@@ -383,7 +383,7 @@ describe('ExtendCodeChainNode', () => {
 		const t = await genOk();
 		const r = t.reply();
 		await t.tools.handle(
-			call('client_ExtendCodeChainNode', { chainId: 'cc-1', parentId: 'handler.create', children: [okChild] }),
+			call(`client_${TOOL_NAMES.extend}`, { chainId: 'cc-1', parentId: 'handler.create', children: [okChild] }),
 			r.sinks,
 		);
 		expect(r.calls[0]?.isError).toBe(false);
@@ -403,7 +403,7 @@ describe('ExtendCodeChainNode', () => {
 		const t = await genOk();
 		const r = t.reply();
 		await t.tools.handle(
-			call('ExtendCodeChainNode', { chainId: 'cc-1', parentId: 'ghost.node', children: [okChild] }),
+			call(TOOL_NAMES.extend, { chainId: 'cc-1', parentId: 'ghost.node', children: [okChild] }),
 			r.sinks,
 		);
 		expect(r.calls[0]?.isError).toBe(true);
@@ -417,7 +417,7 @@ describe('ExtendCodeChainNode', () => {
 		const t = await genOk();
 		const r1 = t.reply();
 		await t.tools.handle(
-			call('ExtendCodeChainNode', { chainId: 'cc-1', parentId: 'handler.create', children: [failingChild] }),
+			call(TOOL_NAMES.extend, { chainId: 'cc-1', parentId: 'handler.create', children: [failingChild] }),
 			r1.sinks,
 		);
 		expect(r1.calls[0]?.isError).toBe(true);
@@ -429,7 +429,7 @@ describe('ExtendCodeChainNode', () => {
 
 		const r2 = t.reply();
 		await t.tools.handle(
-			call('ExtendCodeChainNode', { chainId: 'cc-1', parentId: 'handler.create', children: [okChild] }),
+			call(TOOL_NAMES.extend, { chainId: 'cc-1', parentId: 'handler.create', children: [okChild] }),
 			r2.sinks,
 		);
 		expect(r2.calls[0]?.isError).toBe(false);
@@ -448,15 +448,15 @@ describe('ExtendCodeChainNode', () => {
 		};
 		const t = makeTools();
 		const g = t.reply();
-		await t.tools.handle(call('GenCodeChain', { title: 't', question: 'q', root: okRoot }), g.sinks);
+		await t.tools.handle(call(TOOL_NAMES.entry, { title: 't', question: 'q', root: okRoot }), g.sinks);
 		// Seed the story through the dedicated narrative tool, not Gen.
 		const gn = t.reply();
-		await t.tools.handle(call('NarrateCodeChain', { chainId: 'cc-1', narrative: '旧版故事' }), gn.sinks);
+		await t.tools.handle(call(TOOL_NAMES.narrate, { chainId: 'cc-1', narrative: '旧版故事' }), gn.sinks);
 		expect(gn.calls[0]?.isError).toBe(false);
 		// No narrative on the block → the stored story is untouched.
 		const r1 = t.reply();
 		await t.tools.handle(
-			call('ExtendCodeChainNode', { chainId: 'cc-1', parentId: 'handler.create', children: [okChild] }),
+			call(TOOL_NAMES.extend, { chainId: 'cc-1', parentId: 'handler.create', children: [okChild] }),
 			r1.sinks,
 		);
 		expect(r1.calls[0]?.isError).toBe(false);
@@ -464,7 +464,7 @@ describe('ExtendCodeChainNode', () => {
 		// With narrative → overwritten on the store AND the panel push.
 		const r2 = t.reply();
 		await t.tools.handle(
-			call('ExtendCodeChainNode', {
+			call(TOOL_NAMES.extend, {
 				chainId: 'cc-1',
 				parentId: 'handler.create',
 				children: [eventChild],
@@ -479,11 +479,11 @@ describe('ExtendCodeChainNode', () => {
 		expect(t.updated[2]?.narrative).toBe('新版故事');
 	});
 
-	it('payload guard: an oversized GenCodeChain draft answers with the size + shard recipe', async () => {
+	it('payload guard: an oversized TutorEntry draft answers with the size + shard recipe', async () => {
 		const { tools, reply } = makeTools();
 		const r = reply();
 		await tools.handle(
-			call('GenCodeChain', {
+			call(TOOL_NAMES.entry, {
 				title: 't',
 				question: 'q',
 				root: { ...okRoot, summary: 's'.repeat(7_000) },
@@ -495,7 +495,7 @@ describe('ExtendCodeChainNode', () => {
 		expect(msg).toContain('payload too large');
 		expect(msg).toMatch(/7\d{3} chars/); // the ACTUAL serialized size
 		expect(msg).toContain('3000 char limit'); // the TIGHTENED seed budget
-		expect(msg).toContain('client_ExtendCodeChainNode');
+		expect(msg).toContain(`client_${TOOL_NAMES.extend}`);
 		expect(msg).toContain('120'); // summary cap in the recipe
 	});
 
@@ -503,7 +503,7 @@ describe('ExtendCodeChainNode', () => {
 		const t = await genOk();
 		const r = t.reply();
 		await t.tools.handle(
-			call('ExtendCodeChainNode', {
+			call(TOOL_NAMES.extend, {
 				chainId: 'cc-1',
 				parentId: 'handler.create',
 				children: [{ ...okChild, summary: 'x'.repeat(5_000) }],
@@ -515,18 +515,18 @@ describe('ExtendCodeChainNode', () => {
 		expect(msg).toContain('payload too large');
 		expect(msg).toMatch(/5\d{3} chars/);
 		expect(msg).toContain('3000 char limit'); // the TIGHTENED extend budget
-		expect(msg).toContain('client_ExtendCodeChainNode');
+		expect(msg).toContain(`client_${TOOL_NAMES.extend}`);
 		// The guard rejects BEFORE resolving: no panel update.
 		expect(t.updated).toHaveLength(0);
 	});
 });
 
-// AddCodeChainNode is the node-by-node DEFAULT path: every call carries ONE
+// TutorAdd is the node-by-node DEFAULT path: every call carries ONE
 // node (~300 chars), the only tool JSON a small-output-budget model can emit
 // without truncating. It seeds a new chain from a first node, appends under a
 // parentId, rejects a packed `children` array with the "one per call" recipe,
 // and reuses the shared self-correction gate keyed by session + chain + node.
-describe('AddCodeChainNode', () => {
+describe('TutorAdd (node-by-node default)', () => {
 	const eventNode: ChainNodeDraft = {
 		id: 'event.emitted',
 		label: 'emitOrderCreated',
@@ -537,11 +537,11 @@ describe('AddCodeChainNode', () => {
 		beat: '订单创建后广播',
 	};
 
-	it('create mode: a first node with no chainId/parentId seeds a chain (root = the node, title = label + " 代码链")', async () => {
+	it('create mode: a first node with no chainId/parentId seeds a chain (root = the node, title = label + " 代码导游")', async () => {
 		const { tools, store, shown, verbs, reply } = makeTools();
 		const r = reply();
 		const handled = await tools.handle(
-			call('client_AddCodeChainNode', { node: { ...okRoot, children: undefined } }),
+			call(`client_${TOOL_NAMES.add}`, { node: { ...okRoot, children: undefined } }),
 			r.sinks,
 		);
 		expect(handled).toBe(true);
@@ -553,10 +553,10 @@ describe('AddCodeChainNode', () => {
 			nodeId: 'handler.create',
 			nodeCount: 1,
 			unresolvedCount: 0,
-			nextHint: expect.stringContaining('client_NarrateCodeChain'),
+			nextHint: expect.stringContaining(`client_${TOOL_NAMES.narrate}`),
 		});
 		const created = store.get('cc-1');
-		expect(created?.title).toBe('createOrder 代码链');
+		expect(created?.title).toBe('createOrder 代码导游');
 		expect(created?.root.id).toBe('handler.create');
 		// Seed publishes like Gen: panel reveal + journal verb.
 		expect(shown).toHaveLength(1);
@@ -567,13 +567,13 @@ describe('AddCodeChainNode', () => {
 		const t = makeTools();
 		const g = t.reply();
 		await t.tools.handle(
-			call('client_AddCodeChainNode', { node: { ...okRoot, children: undefined } }),
+			call(`client_${TOOL_NAMES.add}`, { node: { ...okRoot, children: undefined } }),
 			g.sinks,
 		);
 		expect(g.calls[0]?.isError).toBe(false);
 		const r = t.reply();
 		await t.tools.handle(
-			call('AddCodeChainNode', { chainId: 'cc-1', parentId: 'handler.create', node: { ...eventNode, children: undefined } }),
+			call(TOOL_NAMES.add, { chainId: 'cc-1', parentId: 'handler.create', node: { ...eventNode, children: undefined } }),
 			r.sinks,
 		);
 		expect(r.calls[0]?.isError).toBe(false);
@@ -597,10 +597,10 @@ describe('AddCodeChainNode', () => {
 	it('an unknown parentId answers isError with available ids', async () => {
 		const t = makeTools();
 		const g = t.reply();
-		await t.tools.handle(call('AddCodeChainNode', { node: { ...okRoot, children: undefined } }), g.sinks);
+		await t.tools.handle(call(TOOL_NAMES.add, { node: { ...okRoot, children: undefined } }), g.sinks);
 		const r = t.reply();
 		await t.tools.handle(
-			call('AddCodeChainNode', { chainId: 'cc-1', parentId: 'ghost.node', node: { ...eventNode, children: undefined } }),
+			call(TOOL_NAMES.add, { chainId: 'cc-1', parentId: 'ghost.node', node: { ...eventNode, children: undefined } }),
 			r.sinks,
 		);
 		expect(r.calls[0]?.isError).toBe(true);
@@ -613,10 +613,10 @@ describe('AddCodeChainNode', () => {
 	it('a node carrying `children` answers isError and tells the model to add one node per call', async () => {
 		const t = makeTools();
 		const g = t.reply();
-		await t.tools.handle(call('AddCodeChainNode', { node: { ...okRoot, children: undefined } }), g.sinks);
+		await t.tools.handle(call(TOOL_NAMES.add, { node: { ...okRoot, children: undefined } }), g.sinks);
 		const r = t.reply();
 		await t.tools.handle(
-			call('AddCodeChainNode', {
+			call(TOOL_NAMES.add, {
 				chainId: 'cc-1',
 				parentId: 'handler.create',
 				node: { ...eventNode, children: [okChildWithId('extra')] },
@@ -633,10 +633,10 @@ describe('AddCodeChainNode', () => {
 	it('a failing symbol drives the self-correction loop, then a fixed node attaches (round 1 fail → round 2 ok)', async () => {
 		const t = makeTools();
 		const g = t.reply();
-		await t.tools.handle(call('AddCodeChainNode', { node: { ...okRoot, children: undefined } }), g.sinks);
+		await t.tools.handle(call(TOOL_NAMES.add, { node: { ...okRoot, children: undefined } }), g.sinks);
 		const r1 = t.reply();
 		await t.tools.handle(
-			call('AddCodeChainNode', { chainId: 'cc-1', parentId: 'handler.create', node: { ...failingChild, children: undefined } }),
+			call(TOOL_NAMES.add, { chainId: 'cc-1', parentId: 'handler.create', node: { ...failingChild, children: undefined } }),
 			r1.sinks,
 		);
 		expect(r1.calls[0]?.isError).toBe(true);
@@ -647,7 +647,7 @@ describe('AddCodeChainNode', () => {
 		expect(t.store.get('cc-1')?.root.children).toHaveLength(0);
 		const r2 = t.reply();
 		await t.tools.handle(
-			call('AddCodeChainNode', { chainId: 'cc-1', parentId: 'handler.create', node: { ...eventNode, children: undefined } }),
+			call(TOOL_NAMES.add, { chainId: 'cc-1', parentId: 'handler.create', node: { ...eventNode, children: undefined } }),
 			r2.sinks,
 		);
 		expect(r2.calls[0]?.isError).toBe(false);
@@ -658,10 +658,10 @@ describe('AddCodeChainNode', () => {
 	it('an oversized single-node payload trips the tightened 1200-char guard with the one-per-call recipe', async () => {
 		const t = makeTools();
 		const g = t.reply();
-		await t.tools.handle(call('AddCodeChainNode', { node: { ...okRoot, children: undefined } }), g.sinks);
+		await t.tools.handle(call(TOOL_NAMES.add, { node: { ...okRoot, children: undefined } }), g.sinks);
 		const r = t.reply();
 		await t.tools.handle(
-			call('AddCodeChainNode', { chainId: 'cc-1', parentId: 'handler.create', node: { ...eventNode, summary: 'x'.repeat(1_400), children: undefined } }),
+			call(TOOL_NAMES.add, { chainId: 'cc-1', parentId: 'handler.create', node: { ...eventNode, summary: 'x'.repeat(1_400), children: undefined } }),
 			r.sinks,
 		);
 		expect(r.calls[0]?.isError).toBe(true);
@@ -678,7 +678,7 @@ describe('AddCodeChainNode', () => {
 	it('an unknown chainId answers isError (does not seed)', async () => {
 		const { tools, shown, reply } = makeTools();
 		const r = reply();
-		await tools.handle(call('AddCodeChainNode', { chainId: 'ghost', node: { ...eventNode, children: undefined } }), r.sinks);
+		await tools.handle(call(TOOL_NAMES.add, { chainId: 'ghost', node: { ...eventNode, children: undefined } }), r.sinks);
 		expect(r.calls[0]?.isError).toBe(true);
 		expect(r.calls[0]?.content).toContain('unknown chainId');
 		expect(shown).toHaveLength(0);
@@ -687,15 +687,15 @@ describe('AddCodeChainNode', () => {
 	it('missing `node` answers isError', async () => {
 		const { tools, reply } = makeTools();
 		const r = reply();
-		await tools.handle(call('AddCodeChainNode', { chainId: 'cc-1' }), r.sinks);
+		await tools.handle(call(TOOL_NAMES.add, { chainId: 'cc-1' }), r.sinks);
 		expect(r.calls[0]?.isError).toBe(true);
 		expect(r.calls[0]?.content).toContain('node');
 	});
 
-	it('routes the prefixed `client_AddCodeChainNode` name identically (§9.2)', async () => {
+	it('routes the prefixed `client_TutorAdd` name identically (§9.2)', async () => {
 		const { tools, store, reply } = makeTools();
 		const r = reply();
-		const handled = await tools.handle(call('client_AddCodeChainNode', { node: { ...okRoot, children: undefined } }), r.sinks);
+		const handled = await tools.handle(call(`client_${TOOL_NAMES.add}`, { node: { ...okRoot, children: undefined } }), r.sinks);
 		expect(handled).toBe(true);
 		expect(r.calls[0]?.isError).toBe(false);
 		expect(store.get('cc-1')?.root.id).toBe('handler.create');
@@ -712,23 +712,23 @@ describe('Expand / Annotate / Refresh', () => {
 	async function genOk() {
 		const t = makeTools();
 		const r = t.reply();
-		await t.tools.handle(call('GenCodeChain', { title: 't', question: 'q', root: okRoot }), r.sinks);
+		await t.tools.handle(call(TOOL_NAMES.entry, { title: 't', question: 'q', root: okRoot }), r.sinks);
 		return t;
 	}
 
 	it('unknown chainId answers isError pointing at generation', async () => {
 		const { tools, reply } = makeTools();
 		const r = reply();
-		await tools.handle(call('ExpandCodeChainNode', { chainId: 'nope', nodeId: 'x', direction: 'callees' }), r.sinks);
+		await tools.handle(call(TOOL_NAMES.expand, { chainId: 'nope', nodeId: 'x', direction: 'callees' }), r.sinks);
 		expect(r.calls[0]?.isError).toBe(true);
-		expect(r.calls[0]?.content).toContain('client_GenCodeChain');
+		expect(r.calls[0]?.content).toContain(`client_${TOOL_NAMES.entry}`);
 	});
 
 	it('expand with no call-hierarchy provider answers the LSP-unavailable error (§10)', async () => {
 		const t = await genOk();
 		const r = t.reply();
 		await t.tools.handle(
-			call('ExpandCodeChainNode', { chainId: 'cc-1', nodeId: 'handler.create', direction: 'callees' }),
+			call(TOOL_NAMES.expand, { chainId: 'cc-1', nodeId: 'handler.create', direction: 'callees' }),
 			r.sinks,
 		);
 		expect(r.calls[0]?.isError).toBe(true);
@@ -739,7 +739,7 @@ describe('Expand / Annotate / Refresh', () => {
 		const t = await genOk();
 		const r = t.reply();
 		await t.tools.handle(
-			call('AnnotateCodeChainNode', { chainId: 'cc-1', nodeId: 'handler.create', summary: '业务入口', edgeNote: 'e' }),
+			call(TOOL_NAMES.annotate, { chainId: 'cc-1', nodeId: 'handler.create', summary: '业务入口', edgeNote: 'e' }),
 			r.sinks,
 		);
 		expect(r.calls[0]?.isError).toBe(false);
@@ -750,7 +750,7 @@ describe('Expand / Annotate / Refresh', () => {
 	it('refresh re-resolves and reports buckets (§6.3)', async () => {
 		const t = await genOk();
 		const r = t.reply();
-		await t.tools.handle(call('RefreshCodeChain', { chainId: 'cc-1' }), r.sinks);
+		await t.tools.handle(call(TOOL_NAMES.refresh, { chainId: 'cc-1' }), r.sinks);
 		const body = parsed(r.calls[0]?.content);
 		expect(r.calls[0]?.isError).toBe(false);
 		expect(body).toMatchObject({ ok: true, chainId: 'cc-1' });
@@ -766,7 +766,7 @@ describe('Expand / Annotate / Refresh', () => {
 		const t = await genOk();
 		// okRoot resolves to the same range on re-resolve → pure no-op.
 		const r = t.reply();
-		await t.tools.handle(call('RefreshCodeChain', { chainId: 'cc-1' }), r.sinks);
+		await t.tools.handle(call(TOOL_NAMES.refresh, { chainId: 'cc-1' }), r.sinks);
 		expect(r.calls[0]?.isError).toBe(false);
 		const body = parsed(r.calls[0]?.content);
 		expect(body.moved).toEqual([]);
@@ -784,7 +784,7 @@ describe('Expand / Annotate / Refresh', () => {
 		const t = makeTools();
 		const r = t.reply();
 		await t.tools.handle(
-			call('GenCodeChain', {
+			call(TOOL_NAMES.entry, {
 				title: 't',
 				question: 'q',
 				root: {
@@ -805,7 +805,7 @@ describe('Expand / Annotate / Refresh', () => {
 		expect(stored?.location.candidates?.length).toBeGreaterThan(1);
 
 		const rr = t.reply();
-		await t.tools.handle(call('RefreshCodeChain', { chainId: 'cc-1' }), rr.sinks);
+		await t.tools.handle(call(TOOL_NAMES.refresh, { chainId: 'cc-1' }), rr.sinks);
 		expect(rr.calls[0]?.isError).toBe(false);
 		expect(parsed(rr.calls[0]?.content)).toMatchObject({ moved: [], stale: [], fixed: [] });
 		expect(t.updated).toHaveLength(0);
@@ -823,14 +823,14 @@ describe('Expand / Annotate / Refresh', () => {
 // the server waiting its full 300s (un-cancellable) timeout.
 describe('every tool answers non-object / missing-chainId input (review #5)', () => {
 	const toolsSuite: [string, unknown][] = [
-		['ExpandCodeChainNode', null],
-		['ExtendCodeChainNode', null],
-		['AnnotateCodeChainNode', 'a string'],
-		['RefreshCodeChain', 42],
-		['ExpandCodeChainNode', { chainId: 'nope' }],
-		['ExtendCodeChainNode', { chainId: 'ghost' }],
-		['AnnotateCodeChainNode', {}],
-		['RefreshCodeChain', { chainId: 'ghost' }],
+		[TOOL_NAMES.expand, null],
+		[TOOL_NAMES.extend, null],
+		[TOOL_NAMES.annotate, 'a string'],
+		[TOOL_NAMES.refresh, 42],
+		[TOOL_NAMES.expand, { chainId: 'nope' }],
+		[TOOL_NAMES.extend, { chainId: 'ghost' }],
+		[TOOL_NAMES.annotate, {}],
+		[TOOL_NAMES.refresh, { chainId: 'ghost' }],
 	];
 	for (const [name, input] of toolsSuite) {
 		it(`${name} with input ${JSON.stringify(input)} replies without hanging`, async () => {
@@ -849,12 +849,12 @@ describe('every tool answers non-object / missing-chainId input (review #5)', ()
 // Review round-2 (issue): a malformed CHILD node used to be dropped by
 // `parseDraft` with no trace, so the model got `ok:true` for a tree that had
 // quietly lost nodes — it could never repair what it didn't know was gone.
-describe('GenCodeChain reports dropped malformed children', () => {
+describe('TutorEntry reports dropped malformed children', () => {
 	it('a child missing `kind` is dropped and surfaced as a failure with a path', async () => {
 		const { tools, shown, reply } = makeTools();
 		const r = reply();
 		await tools.handle(
-			call('GenCodeChain', {
+			call(TOOL_NAMES.entry, {
 				title: 't',
 				question: 'q',
 				root: {
@@ -880,7 +880,7 @@ describe('GenCodeChain reports dropped malformed children', () => {
 		const { tools, reply } = makeTools();
 		const r = reply();
 		await tools.handle(
-			call('GenCodeChain', {
+			call(TOOL_NAMES.entry, {
 				title: 't',
 				question: 'q',
 				root: {
@@ -898,7 +898,7 @@ describe('GenCodeChain reports dropped malformed children', () => {
 // Review round-2 (critical): once the handle bug is fixed, a genuine `provide*`
 // rejection must reach the model as a tool ERROR — never collapse to the
 // `{ok:true, note:'no new edges at this level'}` lie.
-describe('ExpandCodeChainNode reports provider failures honestly', () => {
+describe('TutorExpand reports provider failures honestly', () => {
 	it('a provideOutgoingCalls rejection answers isError (not "no new edges")', async () => {
 		const { sink } = makeSink();
 		const store = new ChainStore(sink);
@@ -954,11 +954,56 @@ describe('ExpandCodeChainNode reports provider failures honestly', () => {
 		);
 		const calls: { content?: string; isError?: boolean }[] = [];
 		await tools.handle(
-			{ sessionId: 's1', name: 'ExpandCodeChainNode', input: { chainId: 'cc-e', nodeId: 'n1', direction: 'callees' } },
+			{ sessionId: 's1', name: TOOL_NAMES.expand, input: { chainId: 'cc-e', nodeId: 'n1', direction: 'callees' } },
 			{ ok: (content, isError) => calls.push({ content, isError }), err: (message) => calls.push({ content: message }) },
 		);
 		expect(calls[0]?.isError).toBe(true);
 		expect(calls[0]?.content).toContain('provideOutgoingCalls');
 		expect(updated).toHaveLength(0);
+	});
+});
+
+// ── Tutor naming invariants (the rebrand's guard rails) ─────────────────────
+//
+// `TOOL_NAMES` is the single source for every model-visible tool name, so the
+// brand itself is pinned here: seven distinct PascalCase names, disjoint from
+// the harness' built-in tools. This is ALSO the one place the pre-rebrand
+// names may appear — historical journals display them, so the list doubles as
+// a regression guard that nothing ROUTES by them any more.
+
+describe('TOOL_NAMES', () => {
+	const names = Object.values(TOOL_NAMES);
+
+	it('holds exactly seven names, all distinct', () => {
+		expect(names).toHaveLength(7);
+		expect(new Set(names).size).toBe(7);
+	});
+
+	it('every name is PascalCase ^[A-Z][A-Za-z]+$', () => {
+		for (const name of names) {
+			expect(name).toMatch(/^[A-Z][A-Za-z]+$/);
+		}
+	});
+
+	it('collides with no built-in tool name (Read/Write/Edit/Bash/Grep/Glob/Ls)', () => {
+		const builtins = ['Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob', 'Ls'];
+		expect(names.filter((n) => builtins.includes(n))).toEqual([]);
+	});
+
+	it('routes none of the pre-rebrand names (bare or client_-prefixed)', async () => {
+		const { tools } = makeTools();
+		const nullReply: ReplySinks = { ok: () => undefined, err: () => undefined };
+		for (const legacy of [
+			'GenCodeChain',
+			'AddCodeChainNode',
+			'ExtendCodeChainNode',
+			'ExpandCodeChainNode',
+			'AnnotateCodeChainNode',
+			'NarrateCodeChain',
+			'RefreshCodeChain',
+		]) {
+			expect(await tools.handle(call(legacy, { chainId: 'cc-none' }), nullReply)).toBe(false);
+			expect(await tools.handle(call(`client_${legacy}`, { chainId: 'cc-none' }), nullReply)).toBe(false);
+		}
 	});
 });

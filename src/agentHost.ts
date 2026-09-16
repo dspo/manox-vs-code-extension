@@ -66,7 +66,7 @@ function configuredSdkRoot(): string {
  * - openExternal → `vscode.env.openExternal`, reply `{}`. The agent's Open
  *   tool is approval-gated upstream (host_tools), so the wire call arrives
  *   already authorized by the user.
- * - clientTool → the GenCodeChain host tools (§4): `invokeClientTool` MUST
+ * - clientTool → the Code Tutor host tools (§4): `invokeClientTool` MUST
  *   be answered here, before any per-session shield claims the delivery —
  *   a viewed session's no-op handler would otherwise swallow the call into
  *   the server's 300s wait, and a per-session handler could not keep the
@@ -169,7 +169,7 @@ export class AgentHost {
 			);
 		}
 		const stateRoot = configuredStateRoot();
-		// Provision `/codechain` BEFORE the runtime starts: manox's command
+		// Provision `/tutor` BEFORE the runtime starts: manox's command
 		// registry scans `<MANOX_HOME>/commands` once inside
 		// `napiBinding.start()` (this call), so the file must already exist —
 		// hence synchronous, and honoring the same `MANOX_HOME`-over-setting
@@ -179,9 +179,9 @@ export class AgentHost {
 		const provisionRoot = resolveProvisionRoot(stateRoot, process.env.MANOX_HOME, (m) => this.log.warn(m));
 		try {
 			const wrote = ensureCodeChainCommand(provisionRoot);
-			this.log.info(`/codechain command ${wrote} (${join(provisionRoot, 'commands')})`);
+			this.log.info(`/tutor command ${wrote} (${join(provisionRoot, 'commands')})`);
 		} catch (e) {
-			this.log.warn(`failed to provision /codechain: ${errorText(e)}`);
+			this.log.warn(`failed to provision /tutor: ${errorText(e)}`);
 		}
 		this.log.info(`loading native binding from ${sdkRoot} (MANOX_HOME=${stateRoot})`);
 		this.transport = NapiTransport.load({

@@ -1,4 +1,4 @@
-// The code-chain journal card (§7). A GenCodeChain run renders twice: the
+// The code-chain journal card (§7). A Code Tutor run renders twice: the
 // durable `toolCall`/`toolResult` pair folds into the ordinary ToolCallCard
 // (history, searchable), and this card — pushed out-of-band by the host —
 // sits in the same turn as the reopen affordance. It is deliberately NOT a

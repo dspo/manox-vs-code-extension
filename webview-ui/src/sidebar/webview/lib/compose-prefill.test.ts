@@ -2,7 +2,7 @@
 // `compose` note must land ONLY in the composer already showing the owning
 // session. The regression this pins: the draft (home) composer mounts with
 // `sessionId === null`, and an `owner && current && owner !== current` guard
-// short-circuited past the null and leaked a foreign `/codechain …` into a
+// short-circuited past the null and leaked a foreign `/tutor …` into a
 // fresh thread.
 
 import { describe, expect, it } from 'vitest';

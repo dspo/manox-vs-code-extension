@@ -95,16 +95,16 @@
       },
       {
         "command": "manox.codeChain.open",
-        "title": "manox: Open Code Chain",
+        "title": "manox: Open Code Tutor",
         "icon": "$(link)"
       },
       {
         "command": "manox.codeChain.next",
-        "title": "manox: Code Chain Next Step"
+        "title": "manox: Code Tutor Next Step"
       },
       {
         "command": "manox.codeChain.prev",
-        "title": "manox: Code Chain Previous Step"
+        "title": "manox: Code Tutor Previous Step"
       }
     ],
     "menus": {

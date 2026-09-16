@@ -41,7 +41,7 @@ export type ToHost =
 /** Host → webview messages: raw protocol frames plus host state pushes.
  * The `code_chain` verb is the out-of-band journal-card push (§7: a tool
  * invocation by THIS host has no webview-visible side effect otherwise);
- * `compose` backfills the composer with a `/codechain …` question (§10
+ * `compose` backfills the composer with a `/tutor …` question (§10
  * read-only reopen path); it carries the originating sessionId so the
  * composer can verify it belongs to the thread on screen (review #16);
  * `pong` echoes a watchdog `ping`'s seq — the heartbeat reply proving the
@@ -161,7 +161,7 @@ class ManoxSidebarProvider implements vscode.WebviewViewProvider {
 				// chain regenerates from the transcript.
 				if (!codeChainOpenChain(msg.chainId)) {
 					void vscode.window.showWarningMessage(
-						'manox: this code chain is no longer stored — ask the agent to regenerate it (client_GenCodeChain).',
+						'manox: this Code Tutor chain is no longer stored — ask the agent to regenerate it (client_TutorEntry).',
 					);
 				}
 				return;

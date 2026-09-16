@@ -238,11 +238,11 @@ describe('AgentConnection over a scripted wire', () => {
 				sessionId: 's1',
 				clientId: 'vscode-1',
 				toolCallId: 'tc1',
-				name: 'GenCodeChain',
+				name: 'TutorEntry',
 				input: { title: 't' },
 			},
 		});
-		expect(handled).toEqual(['GenCodeChain']);
+		expect(handled).toEqual(['TutorEntry']);
 		expect(shielded).toEqual([]); // shield never saw it
 		expect(wire.sent.at(-1)).toMatchObject({
 			kind: 'reply',

@@ -195,14 +195,16 @@ const DICT = {
     en: (n: number) => `${n} models registered`,
     zh: (n: number) => `已注册 ${n} 个模型`,
   },
-  // ── code-chain (§7 transcript card + session-header plugin chip) ────────
+  // ── code-chain / Code Tutor (§7 transcript card + session-header plugin
+  // chip). Key names keep the `cc_` prefix (wire-stable); the COPY is the
+  // rebranded surface.
   cc_card_nodes: {
-    en: (n: number) => `${n}-node code chain`,
-    zh: (n: number) => `${n} 个节点的代码链`,
+    en: (n: number) => `${n}-node Code Tutor chain`,
+    zh: (n: number) => `${n} 个节点的代码导游`,
   },
-  cc_card_open: { en: 'Open chain', zh: '打开代码链' },
-  cc_chip: { en: 'Code chains', zh: '代码链' },
-  cc_chip_aria: { en: 'Code chains in this session', zh: '本会话的代码链' },
+  cc_card_open: { en: 'Open in Code Tutor', zh: '打开代码导游' },
+  cc_chip: { en: 'Code Tutor', zh: '代码导游' },
+  cc_chip_aria: { en: 'Code Tutor chains in this session', zh: '本会话的代码导游' },
 } satisfies Record<string, Entry>;
 
 export type I18nKey = keyof typeof DICT;

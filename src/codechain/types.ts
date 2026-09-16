@@ -1,4 +1,4 @@
-// GenCodeChain data model — the wire contract between the LLM tool inputs,
+// Code Tutor data model — the wire contract between the LLM tool inputs,
 // the host resolver, the panel, and the chain store. Vscode-free on purpose:
 // `resolve.ts`'s pure core, `chainStore.ts`, and the webview bundle all
 // import these types (the webview re-uses this file the way
@@ -50,7 +50,7 @@ export interface ChainCandidate {
 	label?: string;
 }
 
-/** What the LLM submits per node (GenCodeChain input). */
+/** What the LLM submits per node (`TOOL_NAMES.entry` input). */
 export interface ChainNodeDraft {
 	/** Stable slug, e.g. "order-service.create". */
 	id: string;
@@ -131,7 +131,7 @@ export interface CodeChain {
 // ── structural caps (§3: enforced by the host, relayed back to the LLM) ────
 
 /** Whole-tree depth budget. A seed draft stays shallow (spine ≤ 3 levels)
- * and goes deeper via ExtendCodeChainNode chunks; 4 is the hard ceiling. */
+ * and goes deeper via `TOOL_NAMES.extend` chunks; 4 is the hard ceiling. */
 export const MAX_CHAIN_DEPTH = 4;
 /** Whole-tree node budget. Smaller than the original 80 on purpose: large
  * trees are built progressively (one ≤ MAX_EXTEND_NODES chunk per call),
@@ -140,12 +140,13 @@ export const MAX_CHAIN_NODES = 48;
 export const MAX_SUMMARY_CHARS = 120;
 /** `CodeChain.narrative` length cap — a 300–600 char story, truncated at
  * 1200 if the model overshoots. Committed on its own call
- * (client_NarrateCodeChain) so the narrative never shares a model-output
+ * (`TOOL_NAMES.narrate`, model-facing `client_` prefixed) so the narrative
+ * never shares a model-output
  * budget with the tree it anchors. */
 export const MAX_NARRATIVE_CHARS = 1200;
 /** Per-node story-beat cap (the node's role inside the narrative). */
 export const MAX_BEAT_CHARS = 60;
-/** Children one ExtendCodeChainNode call may attach — the chunk size the
+/** Children one `TOOL_NAMES.extend` call may attach — the chunk size the
  * payload guard assumes for shard guidance. */
 export const MAX_EXTEND_NODES = 8;
 

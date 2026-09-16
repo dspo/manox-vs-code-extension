@@ -4,7 +4,7 @@
 // to the thread CURRENTLY on screen. The failure this guards against: the
 // draft (home) composer is mounted with `sessionId === null`, so a naive
 // `owner && current && owner !== current` guard short-circuits to "accept"
-// on a null-current composer and leaks another session's `/codechain …` into
+// on a null-current composer and leaks another session's `/tutor …` into
 // a brand-new thread. The rule is therefore strictly: apply only when the
 // composer has a concrete session AND it matches the note's owner.
 //

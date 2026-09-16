@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { ClientToolSpec } from '../protocol/types';
 import { SessionToolRegistrar, type RegistrarHost } from './sessionRegistrar';
+import { TOOL_NAMES } from './tools';
 
 // Drain the register promise chain to its `.finally` (microtasks after a
 // resolved send need a macrotask boundary before the in-flight slot frees).
@@ -25,22 +26,22 @@ function fakeHost(opts: { hasWorkspace?: boolean; fail?: boolean } = {}) {
 		hasWorkspace: () => opts.hasWorkspace ?? true,
 		log: (m) => logs.push(m),
 		tools: () => [
-			{ name: 'GenCodeChain', description: 'd', input_schema: {} },
-			{ name: 'ExpandCodeChainNode', description: 'd', input_schema: {} },
+			{ name: TOOL_NAMES.entry, description: 'd', input_schema: {} },
+			{ name: TOOL_NAMES.expand, description: 'd', input_schema: {} },
 		],
 	};
 	return { host, sent, logs };
 }
 
 describe('SessionToolRegistrar', () => {
-	it('sends the full snake_case tool set on the first edge', () => {
+	it('sends the full registered tool set on the first edge', () => {
 		const { host, sent } = fakeHost();
 		new SessionToolRegistrar(host).registerSession('s1');
 		expect(sent).toHaveLength(1);
 		expect(sent[0]?.sessionId).toBe('s1');
 		expect(sent[0]?.tools).toEqual([
-			{ name: 'GenCodeChain', description: 'd', input_schema: {} },
-			{ name: 'ExpandCodeChainNode', description: 'd', input_schema: {} },
+			{ name: TOOL_NAMES.entry, description: 'd', input_schema: {} },
+			{ name: TOOL_NAMES.expand, description: 'd', input_schema: {} },
 		]);
 	});
 

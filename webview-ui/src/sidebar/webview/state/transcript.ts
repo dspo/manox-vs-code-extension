@@ -112,7 +112,7 @@ export type TranscriptItem =
       isError?: boolean;
     }
   | {
-      /** A GenCodeChain result (§7): a transient card (no journal fold —
+      /** A Code Tutor chain-card result (§7): a transient card (no journal fold —
        * the toolCall/toolResult pair already renders as an ordinary tool
        * card), pushed out-of-band by the host and clickable to reopen the
        * editor-area panel. Chain data stays host-side. */

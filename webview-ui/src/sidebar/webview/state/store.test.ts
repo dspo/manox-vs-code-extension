@@ -524,7 +524,7 @@ describe('ServerCall cards', () => {
 	});
 });
 
-// The GenCodeChain journal card (§7): pushed out-of-band (no wire frame
+// The Code Tutor journal card (§7): pushed out-of-band (no wire frame
 // carries it), read back through the `useCodeChainCards` selector for the
 // header chip, and stable across a rebuilt journal window.
 describe('code_chain transient card (review #19)', () => {

@@ -9,8 +9,8 @@
 // standard store hook (`useCodeChainCards`), never imports the header it
 // appears in, and never touches store internals or dispatches a frame.
 //
-// The chip hides while the session has no chain: an empty "Code chains"
-// button is noise; the `/codechain` command (provisioned server-side) is
+// The chip hides while the session has no chain: an empty "Code Tutor"
+// button is noise; the `/tutor` command (provisioned server-side) is
 // the entry point that makes rows appear.
 
 import type { ReactNode } from 'react';
