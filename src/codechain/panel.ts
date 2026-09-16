@@ -1,22 +1,33 @@
-// CodeChainPanel — the editor-area webview (`createWebviewPanel`, the repo's
-// first; HTML/nonce/CSP mirror `sidebarProvider.renderHtml`). One panel at a
-// time shows one chain: opening another chain swaps the content, closing
-// never destroys the chain (§6.3: persistence rides `chainStore`, reopen
-// from the journal card).
+// CodeChainPanel — the Code Tutor surface as a draggable WebviewView (the
+// repo's second webview view, after `manox.chatView`). Contributed into the
+// built-in `panel` location so the user can dock it in the bottom panel, drag
+// it into the sidebar, or float it — the small-screen / split-screen win over
+// the old `createWebviewPanel` editor tab. HTML/nonce/CSP still mirror
+// `sidebarProvider.renderHtml` (via `renderPanelHtml`); one view at a time
+// shows one chain: opening another chain swaps the content, closing never
+// destroys the chain (§6.3: persistence rides `chainStore`, reopen from the
+// journal card).
 //
-// Lifecycle invariants (review #1):
-//   * the panel is created exactly once; a hidden tab is `reveal()`ed, never
-//     re-created, and the dispose handler is identity-guarded so a stale
-//     panel can never null out a live one;
-//   * `retainContextWhenHidden:false` means VS Code may discard the webview
-//     when the tab hides and reload it empty when shown again — the bundle
-//     posts `{t:'ready'}` on mount and the host answers with a fresh
-//     snapshot (chain + tourState + sync), so a re-shown tab is never stuck
-//     in the empty state;
-//   * the reverse-sync watcher attaches ONCE (constructor), not per-create,
+// Lifecycle invariants (review #1), restated for the view API:
+//   * the provider is registered exactly once (in `ensureCodeChain`); VS Code
+//     calls `resolveWebviewView` when the view first opens — the view is never
+//     re-created by us, and the dispose handler is identity-guarded so a stale
+//     view can never null out a live one;
+//   * `retainContextWhenHidden:true` (set on the registration options, not on
+//     `WebviewOptions`, which has no such field) keeps the webview alive when
+//     the view hides. It is best-effort: VS Code may still discard the context
+//     across a window reload, so the bundle posts `{t:'ready'}` on mount and
+//     the host answers with a fresh snapshot (chain + tourState + sync). This
+//     also carries the current chain to a freshly resolved view after a reload
+//     without any separate `context.state` plumbing;
+//   * a host push that outruns the view resolve is never dropped: `show` stashes
+//     the chain as `pendingChain` (and focuses the view), `update` just refreshes
+//     the host-side state, and `resolveWebviewView` drains both. (The old panel
+//     silently discarded an `update` while its panel was uncreated — fixed here);
+//   * the reverse-sync watcher attaches ONCE (constructor), not per-resolve,
 //     and is disposed with the service.
 //
-// The panel is a dumb view over the store: every FromPanel interaction is
+// The view is a dumb view over the store: every FromPanel interaction is
 // answered either locally (candidate pick) or by re-invoking the tool path
 // (`refresh` rides `TOOL_NAMES.refresh` through `CodeChainTools.handle`, so
 // the reply contract has exactly one implementation shared with the LLM).
@@ -30,7 +41,9 @@ import { stepTour, tourOrder } from './tour';
 import type { FromPanel, CodeChain, ResolvedNode, ToPanel } from './types';
 import { findNode, TOOL_NAMES, type CodeChainTools } from './tools';
 
-const PANEL_VIEW_TYPE = 'manox.codeChain';
+/** The contributed webview view id (package.json `contributes.views.panel`).
+ * Focus rides the built-in `<viewId>.focus` command. */
+const TUTOR_VIEW_ID = 'manox.tutorView';
 
 export interface PanelSinks {
 	/** `{t:'verb', kind:'compose'}` backfill into the sidebar composer. */
@@ -47,9 +60,15 @@ function reindexTour(tour: ResolvedNode[], previousId: string | null): number {
 	return tour.findIndex((node) => node.id === previousId);
 }
 
-export class CodeChainPanel {
-	private panel: vscode.WebviewPanel | null = null;
+export class CodeChainPanel implements vscode.WebviewViewProvider {
+	/** The resolved webview view, or null before resolve / after dispose. All
+	 * host→webview posts and the dynamic title go through it. */
+	private view: vscode.WebviewView | null = null;
 	private chain: CodeChain | null = null;
+	/** A chain handed to `show` before the view resolved; drained in
+	 * `resolveWebviewView` so the very first open (e.g. a tool `showChain`) is
+	 * never lost to the resolve race. */
+	private pendingChain: CodeChain | null = null;
 	/** Tour cursor over the current chain's navigable nodes. */
 	private tour: ResolvedNode[] = [];
 	private tourIndex = -1;
@@ -65,28 +84,42 @@ export class CodeChainPanel {
 		private readonly sinks: PanelSinks,
 	) {
 		// Reverse sync attaches once for the service lifetime; the callback
-		// reads `this.chain` so it is inert until a panel holds a chain.
+		// reads `this.chain` (only while a view holds a chain) so it is inert
+		// until the view resolves with a chain.
 		navigation.watchActiveEditor(
-			() => (this.panel ? this.chain : null),
+			() => (this.view ? this.chain : null),
 			(nodeId) => this.post({ t: 'sync', nodeId }),
 		);
 	}
 
 	dispose(): void {
 		for (const d of this.disposables) d.dispose();
-		this.panel?.dispose();
+		// The view is owned by VS Code (created/closed via the workbench); the
+		// service only frees its own listeners and the reverse-sync watcher.
 	}
 
-	/** Reveal with `chain` (create the panel on the very first use). */
+	/** Reveal with `chain` (focus the view when it is already resolved; when it
+	 * is not, stash the chain and trigger the resolve via the focus command). */
 	show(chain: CodeChain): void {
-		if (!this.panel) this.create();
-		this.setChain(chain, /* isNewGeneration */ this.chain?.chainId !== chain.chainId);
-		this.panel?.reveal(undefined, true);
+		const isNewGeneration = this.chain?.chainId !== chain.chainId;
+		if (this.view) {
+			this.view.show(true);
+			this.setChain(chain, isNewGeneration);
+			return;
+		}
+		// Pre-resolve: hold the chain so `resolveWebviewView` can drain it. Do
+		// NOT `setChain` here — that would post into a view that does not exist
+		// yet (the old panel discarded exactly this case).
+		this.pendingChain = chain;
+		void vscode.commands.executeCommand(`${TUTOR_VIEW_ID}.focus`);
 	}
 
-	/** Push a newer version of the open chain (tool merges) without reveal. */
+	/** Push a newer version of the open chain (tool merges) without reveal.
+	 * Updates the host-side state always; posts only when the view is live (a
+	 * not-yet-resolved view catches up via `resolveWebviewView` / ready→resend,
+	 * so nothing is silently dropped). */
 	update(chain: CodeChain): void {
-		if (this.panel) this.setChain(chain, /* isNewGeneration */ this.chain?.chainId !== chain.chainId);
+		this.setChain(chain, /* isNewGeneration */ this.chain?.chainId !== chain.chainId);
 	}
 
 	/** Reopen a stored chain (journal card / plugin chip / command). */
@@ -110,35 +143,53 @@ export class CodeChainPanel {
 		);
 	}
 
-	private create(): void {
-		const webviewPanel = vscode.window.createWebviewPanel(
-			PANEL_VIEW_TYPE,
-			'Code Tutor',
-			{ viewColumn: vscode.ViewColumn.Active, preserveFocus: true },
-			{
-				enableScripts: true,
-				retainContextWhenHidden: false,
-				localResourceRoots: [this.context.extensionUri],
-			},
-		);
-		this.panel = webviewPanel;
-		webviewPanel.webview.html = renderPanelHtml(this.panelHtmlInput(webviewPanel.webview));
-		webviewPanel.webview.onDidReceiveMessage((msg: FromPanel) => this.onMessage(msg, webviewPanel), undefined, this.disposables);
-		// Keybinding scope is `activeWebviewPanelId == manox.codeChain`
-		// (package.json) — the precise built-in predicate, so alt+left/right
-		// only fire while this panel holds focus and never steal the
-		// workbench back/forward nav (review #13). No context key to manage.
-		webviewPanel.onDidDispose(() => {
-			// Identity guard: a late dispose from a replaced panel must not
+	// ── vscode.WebviewViewProvider ──────────────────────────────────────────
+
+	/** VS Code calls this when the view first opens (and, without
+	 * `retainContextWhenHidden`, whenever it needs a fresh context). This is
+	 * the old `create()` body, now driven by the resolve callback instead of
+	 * `createWebviewPanel`. */
+	resolveWebviewView(webviewView: vscode.WebviewView): void {
+		// `WebviewOptions` has no `retainContextWhenHidden` field — it lives on
+		// the registration's `webviewOptions` (see registration.ts), so only
+		// `enableScripts` + `localResourceRoots` are set here.
+		webviewView.webview.options = {
+			enableScripts: true,
+			localResourceRoots: [this.context.extensionUri],
+		};
+		webviewView.webview.html = renderPanelHtml(this.panelHtmlInput(webviewView.webview));
+		this.view = webviewView;
+
+		webviewView.webview.onDidReceiveMessage((msg: FromPanel) => this.onMessage(msg, webviewView), undefined, this.disposables);
+		// Keybinding scope is `focusViewId == manox.tutorView` (package.json) —
+		// the precise built-in predicate for a webview VIEW, so alt+left/right
+		// only fire while this view holds focus and never steal the workbench
+		// back/forward nav (review #13). No context key to manage.
+		webviewView.onDidDispose(() => {
+			// Identity guard: a late dispose from a replaced view must not
 			// clear the current one (review #1).
-			if (this.panel === webviewPanel) {
-				this.panel = null;
+			if (this.view === webviewView) {
+				this.view = null;
 				this.chain = null;
 				this.tour = [];
 				this.tourIndex = -1;
 				this.tourNodeId = null;
 			}
 		});
+
+		if (this.chain) {
+			// State survives a re-resolve (e.g. a window reload restored a
+			// shown chain, or the view was disposed while `chain` was still
+			// live): re-apply the title and re-push so the fresh bundle is not
+			// stuck in the empty state (ready→resend is the backstop).
+			this.applyTitle(this.chain);
+			this.post({ t: 'chain', chain: this.chain });
+			this.post({ t: 'tourState', index: this.tourIndex, total: this.tour.length });
+		} else if (this.pendingChain) {
+			const chain = this.pendingChain;
+			this.pendingChain = null;
+			this.setChain(chain, /* isNewGeneration */ true);
+		}
 	}
 
 	private panelHtmlInput(webview: vscode.Webview) {
@@ -152,11 +203,16 @@ export class CodeChainPanel {
 			).toString(),
 			// The shared Tailwind sheet covers both surfaces: `tokens.css`
 			// @sources the codechain tree, so one `bundle.css` carries the
-			// panel's utilities too — no second stylesheet.
+			// view's utilities too — no second stylesheet.
 			styleUri: webview.asWebviewUri(
 				vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'bundle.css'),
 			).toString(),
 		};
+	}
+
+	/** The dynamic view header: a resolved view shows the open chain's title. */
+	private applyTitle(chain: CodeChain): void {
+		if (this.view) this.view.title = `⛓ ${chain.title}`;
 	}
 
 	private setChain(chain: CodeChain, isNewGeneration: boolean): void {
@@ -175,8 +231,8 @@ export class CodeChainPanel {
 			this.tourIndex = reindexed;
 			this.tourNodeId = reindexed >= 0 ? keepCursor : null;
 		}
-		if (this.panel) {
-			this.panel.title = `⛓ ${chain.title}`;
+		if (this.view) {
+			this.applyTitle(chain);
 			this.post({ t: 'chain', chain });
 			this.post({ t: 'tourState', index: this.tourIndex, total: this.tour.length });
 		}
@@ -184,16 +240,16 @@ export class CodeChainPanel {
 
 	/** Answer a bundle (re)mount: the webview context may have been
 	 * discarded while hidden, so re-send every slice of current state. */
-	private resend(webviewPanel: vscode.WebviewPanel): void {
-		if (!this.chain || this.panel !== webviewPanel) return;
-		webviewPanel.webview.postMessage({ t: 'chain', chain: this.chain } satisfies ToPanel);
-		webviewPanel.webview.postMessage({ t: 'tourState', index: this.tourIndex, total: this.tour.length } satisfies ToPanel);
-		webviewPanel.webview.postMessage({ t: 'sync', nodeId: this.lastSync } satisfies ToPanel);
+	private resend(webviewView: vscode.WebviewView): void {
+		if (!this.chain || this.view !== webviewView) return;
+		webviewView.webview.postMessage({ t: 'chain', chain: this.chain } satisfies ToPanel);
+		webviewView.webview.postMessage({ t: 'tourState', index: this.tourIndex, total: this.tour.length } satisfies ToPanel);
+		webviewView.webview.postMessage({ t: 'sync', nodeId: this.lastSync } satisfies ToPanel);
 	}
 
-	private onMessage(msg: FromPanel, source: vscode.WebviewPanel): void {
-		// A message from a replaced panel is dropped outright.
-		if (source !== this.panel) return;
+	private onMessage(msg: FromPanel, source: vscode.WebviewView): void {
+		// A message from a replaced view is dropped outright.
+		if (source !== this.view) return;
 		switch (msg?.t) {
 			case 'ready':
 				this.resend(source);
@@ -240,7 +296,7 @@ export class CodeChainPanel {
 		if (!jumped) this.post({ t: 'toast', message: 'node has no resolved location — refresh or pick a candidate' });
 	}
 
-	/** Tour step for the open chain (panel buttons and the contributed
+	/** Tour step for the open chain (view buttons and the contributed
 	 * `alt+left/right` keybinding share this cursor). */
 	stepTour(dir: 'prev' | 'next'): void {
 		const step = stepTour(this.tour, this.tourIndex, dir);
@@ -278,7 +334,7 @@ export class CodeChainPanel {
 
 	private post(message: ToPanel): void {
 		if (message.t === 'sync') this.lastSync = message.nodeId;
-		void this.panel?.webview.postMessage(message);
+		void this.view?.webview.postMessage(message);
 	}
 }
 

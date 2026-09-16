@@ -87,6 +87,16 @@ export function ensureCodeChain(context: ExtensionContext, host: AgentHost): voi
 		},
 		log,
 	});
+	// The Code Tutor surface is a draggable webview VIEW (contributes.views.
+	// panel → manox.tutorView), not an editor tab: it registers alongside the
+	// service. `retainContextWhenHidden` lives on the registration's
+	// webviewOptions (WebviewOptions itself has no such field); the ready→
+	// resend handshake still backstops a context discard (window reload).
+	context.subscriptions.push(
+		vscode.window.registerWebviewViewProvider('manox.tutorView', panel, {
+			webviewOptions: { retainContextWhenHidden: true },
+		}),
+	);
 	const tools = new CodeChainTools(deps, store, {
 		showChain: (chain) => panel.show(chain),
 		updateChain: (chain) => panel.update(chain),

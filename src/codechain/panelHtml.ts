@@ -1,8 +1,9 @@
-// The code-chain panel document, extracted from `panel.ts` so it is a
+// The Code Tutor view document, extracted from `panel.ts` so it is a
 // vscode-free pure function (the vscode `Webview` only supplies the string
 // inputs) and therefore unit-testable (§19). CSP/nonce/asset wiring mirrors
-// `sidebarProvider.renderHtml` exactly — this is the repo's first
-// `createWebviewPanel` but deliberately NOT a new HTML discipline.
+// `sidebarProvider.renderHtml` exactly — the same document shape feeds the
+// webview VIEW's `webview.html` now that the panel is a `WebviewViewProvider`;
+// deliberately NOT a new HTML discipline.
 
 export interface PanelHtmlInput {
 	/** Per-document random nonce (the CSP `script-src`/`style-src` allowlist). */

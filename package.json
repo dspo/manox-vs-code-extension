@@ -77,6 +77,15 @@
           "name": "manox",
           "contextualTitle": "manox"
         }
+      ],
+      "panel": [
+        {
+          "type": "webview",
+          "id": "manox.tutorView",
+          "name": "Code Tutor",
+          "icon": "resources/icon.svg",
+          "contextualTitle": "Code Tutor"
+        }
       ]
     },
     "commands": [
@@ -126,12 +135,12 @@
       {
         "command": "manox.codeChain.next",
         "key": "alt+right",
-        "when": "activeWebviewPanelId == manox.codeChain"
+        "when": "focusViewId == manox.tutorView"
       },
       {
         "command": "manox.codeChain.prev",
         "key": "alt+left",
-        "when": "activeWebviewPanelId == manox.codeChain"
+        "when": "focusViewId == manox.tutorView"
       }
     ]
   },

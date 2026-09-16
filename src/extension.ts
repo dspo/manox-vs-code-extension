@@ -29,15 +29,19 @@ export function activate(context: vscode.ExtensionContext): void {
 	);
 }
 
-/** Palette + keybinding surface for the code-chain panel. Opening goes
- * through a quick-pick over the stored chains (§7: chains outlive their
- * session, so this works after reloads); the tour-step commands are bound
- * `alt+left/right` ONLY while the code-chain webview panel holds focus
- * (`activeWebviewPanelId == manox.codeChain`), so they never collide with
- * the workbench navigate-back/forward (review #13). */
+/** Palette + keybinding surface for the Code Tutor view. Opening focuses the
+ * draggable view and then goes through a quick-pick over the stored chains
+ * (§7: chains outlive their session, so this works after reloads; a chain
+ * pick routes back through `panel.show`, which swaps the view's content); the
+ * tour-step commands are bound `alt+left/right` ONLY while the code-chain
+ * webview VIEW holds focus (`focusViewId == manox.tutorView`), so they never
+ * collide with the workbench navigate-back/forward (review #13). */
 function registerCodeChainCommands(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('manox.codeChain.open', async () => {
+			// Reveal the (draggable) tutor view first so the panel is on
+			// screen even when the user cancels the quick-pick below.
+			void vscode.commands.executeCommand('manox.tutorView.focus');
 			const chains = codeChainListChains();
 			if (chains.length === 0) {
 				await vscode.window.showInformationMessage(
