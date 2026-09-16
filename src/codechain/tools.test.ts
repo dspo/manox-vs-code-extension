@@ -118,10 +118,11 @@ function parsed(content: string | undefined): Record<string, unknown> {
 }
 
 describe('client tool specs', () => {
-	it('register all four, read-only, snake_case-ready', () => {
+	it('register all five, read-only, snake_case-ready', () => {
 		const specs = clientToolSpecs();
 		expect(specs.map((s) => s.name)).toEqual([
 			'GenCodeChain',
+			'ExtendCodeChainNode',
 			'ExpandCodeChainNode',
 			'AnnotateCodeChainNode',
 			'RefreshCodeChain',
@@ -129,13 +130,19 @@ describe('client tool specs', () => {
 		expect(specs.every((s) => s.readOnly === true)).toBe(true);
 		// Cross-references between tools use the model-facing prefixed names
 		// (§8 Phase 0 revision): the model never sees the bare registration
-		// name, so the descriptions must not reference it either.
-		expect(specs[1]?.description).toContain('client_AnnotateCodeChainNode');
-		expect(specs[2]?.description).toContain('client_ExpandCodeChainNode');
+		// name, so the descriptions must not reference it either. The
+		// progressive chain-building pair (Gen ↔ Extend) must point at each
+		// other, and the semantics pair (Expand ↔ Annotate ↔ Extend) too.
+		expect(specs[0]?.description).toContain('client_ExtendCodeChainNode');
+		expect(specs[1]?.description).toContain('client_GenCodeChain');
+		expect(specs[2]?.description).toContain('client_AnnotateCodeChainNode');
+		expect(specs[2]?.description).toContain('client_ExtendCodeChainNode');
+		expect(specs[3]?.description).toContain('client_ExpandCodeChainNode');
+		expect(specs[3]?.description).toContain('client_ExtendCodeChainNode');
 		for (const spec of specs) {
 			// A bare (unprefixed) tool name would be a name the model can
 			// never call — reject it in every description.
-			expect(spec.description).not.toMatch(/(^|[^_A-Za-z])(GenCodeChain|ExpandCodeChainNode|AnnotateCodeChainNode|RefreshCodeChain)(?!_)/);
+			expect(spec.description).not.toMatch(/(^|[^_A-Za-z])(GenCodeChain|ExtendCodeChainNode|ExpandCodeChainNode|AnnotateCodeChainNode|RefreshCodeChain)(?!_)/);
 		}
 	});
 });
@@ -197,6 +204,191 @@ describe('GenCodeChain', () => {
 		await tools.handle(call('GenCodeChain', { title: 't', root: { id: 'x' } }), r.sinks);
 		expect(r.calls[0]?.isError).toBe(true);
 		expect(r.calls[0]?.content).toContain('requires');
+	});
+
+	it('a seeded narrative rides the chain AND the panel push', async () => {
+		const { tools, store, shown, reply } = makeTools();
+		const r = reply();
+		await tools.handle(
+			call('GenCodeChain', {
+				title: 't',
+				question: 'q',
+				narrative: '用户发起下单，系统先校验库存再落库广播。',
+				root: okRoot,
+			}),
+			r.sinks,
+		);
+		expect(r.calls[0]?.isError).toBe(false);
+		expect(store.get('cc-1')?.narrative).toBe('用户发起下单，系统先校验库存再落库广播。');
+		expect(shown[0]?.narrative).toBe('用户发起下单，系统先校验库存再落库广播。');
+	});
+
+	it('an omitted narrative keeps the field off the wire (old-chain compat)', async () => {
+		const { tools, store, reply } = makeTools();
+		const r = reply();
+		await tools.handle(call('GenCodeChain', { title: 't', question: 'q', root: okRoot }), r.sinks);
+		expect(r.calls[0]?.isError).toBe(false);
+		expect('narrative' in (store.get('cc-1') ?? {})).toBe(false);
+	});
+});
+
+// Progressive chain building (§ plan): ExtendCodeChainNode attaches a ≤8-node
+// block under an existing parent, reusing the self-correction gate; the
+// payload guards turn an oversized draft into an actionable re-shard
+// instruction instead of a silent transport failure.
+describe('ExtendCodeChainNode', () => {
+	const okChild: ChainNodeDraft = {
+		id: 'service.create',
+		label: 'create',
+		kind: 'call',
+		file: 'src/order/service.ts',
+		symbol: 'OrderService.create',
+		summary: '核心下单逻辑',
+		beat: '库存与风控校验',
+	};
+
+	async function genOk() {
+		const t = makeTools();
+		const r = t.reply();
+		await t.tools.handle(call('GenCodeChain', { title: 't', question: 'q', root: okRoot }), r.sinks);
+		expect(r.calls[0]?.isError).toBe(false);
+		return t;
+	}
+
+	it('attaches resolved children under the parent, recomputes stats, and pushes the panel update', async () => {
+		const t = await genOk();
+		const r = t.reply();
+		await t.tools.handle(
+			call('client_ExtendCodeChainNode', { chainId: 'cc-1', parentId: 'handler.create', children: [okChild] }),
+			r.sinks,
+		);
+		expect(r.calls[0]?.isError).toBe(false);
+		expect(parsed(r.calls[0]?.content)).toMatchObject({ ok: true, chainId: 'cc-1', added: ['service.create'], nodeCount: 2, unresolvedCount: 0 });
+		const stored = t.store.get('cc-1');
+		expect(stored?.root.children[0]?.id).toBe('service.create');
+		// The block's beat survives resolution (draft → ResolvedNode).
+		expect(stored?.root.children[0]?.beat).toBe('库存与风控校验');
+		// Whole-tree stats recomputed from the new tree.
+		expect(stored?.stats).toEqual({ nodeCount: 2, unresolvedCount: 0 });
+		// Update (NOT reveal — the panel stays where it was) rides once.
+		expect(t.updated).toHaveLength(1);
+		expect(t.shown).toHaveLength(1); // only the original gen
+	});
+
+	it('an unknown parentId answers isError with up to 10 available ids', async () => {
+		const t = await genOk();
+		const r = t.reply();
+		await t.tools.handle(
+			call('ExtendCodeChainNode', { chainId: 'cc-1', parentId: 'ghost.node', children: [okChild] }),
+			r.sinks,
+		);
+		expect(r.calls[0]?.isError).toBe(true);
+		const body = parsed(r.calls[0]?.content);
+		expect(body.error).toContain('ghost.node');
+		expect(body.availableIds).toEqual(expect.arrayContaining([expect.stringContaining('handler.create')]));
+		expect((body.availableIds as string[]).length).toBeLessThanOrEqual(10);
+	});
+
+	it('a failing node drives the self-correction loop, then a fixed retry attaches (round 1 fail → round 2 ok)', async () => {
+		const t = await genOk();
+		const r1 = t.reply();
+		await t.tools.handle(
+			call('ExtendCodeChainNode', { chainId: 'cc-1', parentId: 'handler.create', children: [failingChild] }),
+			r1.sinks,
+		);
+		expect(r1.calls[0]?.isError).toBe(true);
+		const body = parsed(r1.calls[0]?.content);
+		expect(body.failures).toEqual([{ nodeId: 'ghost', reason: expect.any(String) }]);
+		// Nothing published or stored while correcting.
+		expect(t.updated).toHaveLength(0);
+		expect(t.store.get('cc-1')?.root.children).toHaveLength(0);
+
+		const r2 = t.reply();
+		await t.tools.handle(
+			call('ExtendCodeChainNode', { chainId: 'cc-1', parentId: 'handler.create', children: [okChild] }),
+			r2.sinks,
+		);
+		expect(r2.calls[0]?.isError).toBe(false);
+		expect(t.store.get('cc-1')?.root.children[0]?.id).toBe('service.create');
+		expect(t.updated).toHaveLength(1);
+	});
+
+	it('a narrative in the block overrides the chain story; an omitted one keeps it', async () => {
+		const eventChild: ChainNodeDraft = {
+			id: 'event.emitted',
+			label: 'emitOrderCreated',
+			kind: 'data',
+			file: 'src/order/events.ts',
+			symbol: 'emitOrderCreated',
+			summary: '领域事件广播',
+		};
+		const t = makeTools();
+		const g = t.reply();
+		await t.tools.handle(
+			call('GenCodeChain', { title: 't', question: 'q', narrative: '旧版故事', root: okRoot }),
+			g.sinks,
+		);
+		// No narrative on the block → the stored story is untouched.
+		const r1 = t.reply();
+		await t.tools.handle(
+			call('ExtendCodeChainNode', { chainId: 'cc-1', parentId: 'handler.create', children: [okChild] }),
+			r1.sinks,
+		);
+		expect(r1.calls[0]?.isError).toBe(false);
+		expect(t.store.get('cc-1')?.narrative).toBe('旧版故事');
+		// With narrative → overwritten on the store AND the panel push.
+		const r2 = t.reply();
+		await t.tools.handle(
+			call('ExtendCodeChainNode', {
+				chainId: 'cc-1',
+				parentId: 'handler.create',
+				children: [eventChild],
+				narrative: '新版故事',
+			}),
+			r2.sinks,
+		);
+		expect(r2.calls[0]?.isError).toBe(false);
+		expect(t.store.get('cc-1')?.narrative).toBe('新版故事');
+		expect(t.updated[1]?.narrative).toBe('新版故事');
+	});
+
+	it('payload guard: an oversized GenCodeChain draft answers with the size + shard recipe', async () => {
+		const { tools, reply } = makeTools();
+		const r = reply();
+		await tools.handle(
+			call('GenCodeChain', {
+				title: 't',
+				question: 'q',
+				root: { ...okRoot, summary: 's'.repeat(7_000) },
+			}),
+			r.sinks,
+		);
+		expect(r.calls[0]?.isError).toBe(true);
+		const msg = r.calls[0]?.content ?? '';
+		expect(msg).toContain('payload too large');
+		expect(msg).toMatch(/7\d{3} chars/); // the ACTUAL serialized size
+		expect(msg).toContain('client_ExtendCodeChainNode');
+		expect(msg).toContain('120'); // summary cap in the recipe
+	});
+
+	it('payload guard: an oversized Extend block answers with the size + shard recipe', async () => {
+		const t = await genOk();
+		const r = t.reply();
+		await t.tools.handle(
+			call('ExtendCodeChainNode', {
+				chainId: 'cc-1',
+				parentId: 'handler.create',
+				children: [{ ...okChild, summary: 'x'.repeat(5_000) }],
+			}),
+			r.sinks,
+		);
+		expect(r.calls[0]?.isError).toBe(true);
+		const msg = r.calls[0]?.content ?? '';
+		expect(msg).toContain('payload too large');
+		expect(msg).toMatch(/5\d{3} chars/);
+		expect(msg).toContain('client_ExtendCodeChainNode');
+		// The guard rejects BEFORE resolving: no panel update.
+		expect(t.updated).toHaveLength(0);
 	});
 });
 
@@ -316,9 +508,11 @@ describe('Expand / Annotate / Refresh', () => {
 describe('every tool answers non-object / missing-chainId input (review #5)', () => {
 	const toolsSuite: [string, unknown][] = [
 		['ExpandCodeChainNode', null],
+		['ExtendCodeChainNode', null],
 		['AnnotateCodeChainNode', 'a string'],
 		['RefreshCodeChain', 42],
 		['ExpandCodeChainNode', { chainId: 'nope' }],
+		['ExtendCodeChainNode', { chainId: 'ghost' }],
 		['AnnotateCodeChainNode', {}],
 		['RefreshCodeChain', { chainId: 'ghost' }],
 	];

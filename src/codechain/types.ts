@@ -65,6 +65,10 @@ export interface ChainNodeDraft {
 	summary: string;
 	/** Why this step follows its parent. */
 	edgeNote?: string;
+	/** The one story-beat this node plays in the chain-level `narrative`
+	 * (≤ MAX_BEAT_CHARS). Optional: older drafts and host-expanded nodes
+	 * carry none, and the panel only renders it when present. */
+	beat?: string;
 	children?: ChainNodeDraft[];
 }
 
@@ -99,6 +103,9 @@ export interface ResolvedNode {
 	kind: ChainKind;
 	summary: string;
 	edgeNote?: string;
+	/** Story-beat annotation carried through from the draft (optional; the
+	 * panel renders it only when present). */
+	beat?: string;
 	provenance: NodeProvenance;
 	location: ChainLocation;
 	children: ResolvedNode[];
@@ -114,13 +121,31 @@ export interface CodeChain {
 	createdAt: number;
 	root: ResolvedNode;
 	stats: { nodeCount: number; unresolvedCount: number };
+	/** The chain's coherent business story in the user's language (markdown,
+	 * ≤ MAX_NARRATIVE_CHARS). Optional for wire compatibility: chains saved
+	 * before the narrative rollout carry none, and the panel renders no
+	 * story block for them. */
+	narrative?: string;
 }
 
 // ── structural caps (§3: enforced by the host, relayed back to the LLM) ────
 
-export const MAX_CHAIN_DEPTH = 5;
-export const MAX_CHAIN_NODES = 80;
-export const MAX_SUMMARY_CHARS = 200;
+/** Whole-tree depth budget. A seed draft stays shallow (spine ≤ 3 levels)
+ * and goes deeper via ExtendCodeChainNode chunks; 4 is the hard ceiling. */
+export const MAX_CHAIN_DEPTH = 4;
+/** Whole-tree node budget. Smaller than the original 80 on purpose: large
+ * trees are built progressively (one ≤ MAX_EXTEND_NODES chunk per call),
+ * so no single payload has to carry the whole chain. */
+export const MAX_CHAIN_NODES = 48;
+export const MAX_SUMMARY_CHARS = 120;
+/** `CodeChain.narrative` length cap — a 300–600 char story, truncated at
+ * 1200 if the model overshoots. */
+export const MAX_NARRATIVE_CHARS = 1200;
+/** Per-node story-beat cap (the node's role inside the narrative). */
+export const MAX_BEAT_CHARS = 60;
+/** Children one ExtendCodeChainNode call may attach — the chunk size the
+ * payload guard assumes for shard guidance. */
+export const MAX_EXTEND_NODES = 8;
 
 // ── panel message vocabulary (§6.4) ────────────────────────────────────────
 
@@ -130,7 +155,7 @@ export const MAX_SUMMARY_CHARS = 200;
  * one-line status.
  *
  * DEVIATION from §6.4: the incremental `{t:'patch',ops}` channel was cut in
- * v1 — every update re-sends the whole tree (≤80 nodes). The panel keeps
+ * v1 — every update re-sends the whole tree (≤48 nodes). The panel keeps
  * selection / collapse / cursor across a re-send (§6.3 state preservation),
  * so the full-tree push is behaviorally equivalent for its consumers. */
 export type ToPanel =

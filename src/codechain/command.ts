@@ -34,11 +34,13 @@ argument-hint: <what to understand, e.g. 订单创建接口的业务逻辑>
 ---
 用户想通过「代码链」功能阅读理解代码。用户的问题：$ARGUMENTS
 
-工作流程：
-1. 先用可用的检索/阅读工具定位该业务的入口（路由/handler/公开 API），再沿真实调用关系读下去，直到覆盖完整业务闭环（入口→校验→核心逻辑→持久化/事件→出口）。
-2. 调用 client_GenCodeChain 输出树。节点必须是你亲眼在代码里见过的符号；summary 用用户的语言写业务含义。
-3. 工具返回后，用 2-3 句话向用户概述这条链的主干，并提示：点击树节点或按“上一步/下一步”可跟随代码阅读；想深挖某节点可让你 client_ExpandCodeChainNode 展开其真实调用边。
-若 client_GenCodeChain 报告符号解析失败，根据报错修正 file/symbol 后重试（最多 3 次），仍失败则将失败节点降级为 kind='note' 并在 summary 说明。
+工作流程（业务优先，渐进成链）：
+1. 先用可用的检索/阅读工具定位业务入口（路由/handler/公开 API），先读通业务闭环——状态在哪里被改变、事件发到哪里、账在哪里记——再沿真实调用关系回填调用路径。只通读改变或承载业务状态的步骤；middleware、参数格式校验、幂等、审计日志、错误包装、DTO 转换等惯例代码不要作为节点深入（有业务例外含义的一句话写进父节点 summary 或 edgeNote）。
+2. 调用 client_GenCodeChain 播种：必须带 narrative（300-600 字 markdown 连贯业务故事：触发→关键决策→状态流转→对外后果），树只放故事主干（spine）——业务语义不同的分支才展开，错误/回退路径最多用一个 kind='note' 节点概括；每个节点带 summary（≤120 字，用户语言讲业务上发生了什么）和 beat（≤60 字，该节点在 narrative 中承担的一拍）。
+3. 值得深入的 spine 节点用 client_ExtendCodeChainNode 逐块补充：每块前先用读工具读该函数确认其业务含义，每块 ≤8 个新节点；本块改变故事时传更新后的完整 narrative，否则省略。
+4. 之后：真实调用边用 client_ExpandCodeChainNode（宿主经 LSP 解析），语义补注用 client_AnnotateCodeChainNode。
+5. 工具返回后，用 2-3 句话向用户概述这条链的主干（回扣 narrative 的故事线），并提示：点击树节点或按“上一步/下一步”可跟随代码阅读。
+若 client_GenCodeChain 或 client_ExtendCodeChainNode 报告符号解析失败，根据报错修正 file/symbol 后重试（最多 3 次），仍失败则将失败节点降级为 kind='note' 并在 summary 说明。若工具报告 payload too large 或节点/摘要被截断，改用更小的分片重试，禁止原样重发。
 `;
 
 /** Resolve the state root to provision, mirroring the transport's own

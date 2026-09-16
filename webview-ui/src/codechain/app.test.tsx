@@ -214,4 +214,100 @@ describe('code-chain panel', () => {
 		// New generation → collapsed subtree re-appears.
 		expect(document.body.textContent ?? '').toContain('validateStock');
 	});
+
+	// ── progressive narrative / beat rendering ──────────────────────────────
+
+	it('the detail pane renders the chain narrative as a markdown block', () => {
+		renderPanel();
+		expect(text()).toContain('业务叙事');
+		// The fixture story text (asserted in pieces: react-markdown splits
+		// the bold span into its own element).
+		expect(text()).toContain('用户发起下单后');
+		expect(text()).toContain('库存校验');
+		expect(text()).toContain('领域事件广播');
+		expect(text()).toContain('事务回滚');
+	});
+
+	it('node beats render in the tree rows and the detail pane', () => {
+		const withBeat: CodeChain = {
+			...chain,
+			root: {
+				...chain.root,
+				beat: '用户发起下单',
+				children: chain.root.children.map((c) => (c.id === 'service.create' ? { ...c, beat: '受理并校验' } : c)),
+			},
+		};
+		const bridge = createRecordingBridge();
+		root = createRoot(host());
+		act(() => {
+			root!.render(createElement(CodeChainApp, { bridge }));
+		});
+		act(() => {
+			bridge.feed({ t: 'chain', chain: withBeat });
+		});
+		expect(text()).toContain('用户发起下单'); // root beat (detail pane is on the root)
+		expect(text()).toContain('受理并校验'); // service.create beat (tree row)
+	});
+
+	it('two feeds grow the tree (Extend-style same-chain update keeps view state)', () => {
+		const { bridge } = renderPanel();
+		// Collapse service.create, then push an Extend-shaped update that
+		// attaches a new grandchild under it + recomputed stats.
+		const collapse = Array.from(document.querySelectorAll('[role="button"]')).find((el) =>
+			(el.textContent ?? '').includes('校验库存与风控'),
+		)!.querySelector('button');
+		act(() => collapse!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+		const grown: CodeChain = {
+			...chain,
+			stats: { nodeCount: chain.stats.nodeCount + 1, unresolvedCount: chain.stats.unresolvedCount },
+			root: {
+				...chain.root,
+				children: chain.root.children.map((c) =>
+					c.id === 'service.create'
+						? {
+								...c,
+								children: [
+									...c.children,
+									{
+										id: 'stock.lock',
+										label: 'lockStock',
+										kind: 'impl' as const,
+										summary: '锁库存',
+										beat: '并发保护',
+										provenance: 'llm' as const,
+										location: { uri: '', resolveStatus: 'ok' as const },
+										children: [],
+									},
+								],
+							}
+						: c,
+				),
+			},
+		};
+		act(() => {
+			bridge.feed({ t: 'chain', chain: grown });
+		});
+		// Same chainId: the user's collapse survives (review #6 semantics),
+		// so the new node is inside the collapsed subtree — hidden from the
+		// visible rows, but the tree itself is one node bigger.
+		expect(text()).not.toContain('lockStock');
+		const service = grown.root.children.find((c) => c.id === 'service.create');
+		expect(service?.children).toHaveLength(3);
+	});
+
+	it('legacy chains (no narrative / beat) render without the story block', () => {
+		const legacy: CodeChain = { ...chain, narrative: undefined };
+		const bridge = createRecordingBridge();
+		root = createRoot(host());
+		act(() => {
+			root!.render(createElement(CodeChainApp, { bridge }));
+		});
+		act(() => {
+			bridge.feed({ t: 'chain', chain: legacy });
+		});
+		// Rows still render (no crash on the missing fields)...
+		expect(text()).toContain('createOrder');
+		// ...but the narrative block is absent entirely.
+		expect(text()).not.toContain('业务叙事');
+	});
 });

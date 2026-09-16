@@ -30,6 +30,19 @@ describe('provisionCodeChainCommand (review #12)', () => {
 		expect(md).toContain('$ARGUMENTS');
 		expect(md).toContain('client_GenCodeChain');
 		expect(md).toContain('argument-hint');
+		// Progressive-building workflow keywords: the narrative seed, the
+		// Extend block tool, the Expand/Annotate follow-up roles, the business
+		// loop-first reading step, the truncation/re-shard clause, and the
+		// size caps the workflow names explicitly.
+		expect(md).toContain('client_ExtendCodeChainNode');
+		expect(md).toContain('client_ExpandCodeChainNode');
+		expect(md).toContain('client_AnnotateCodeChainNode');
+		expect(md).toContain('narrative');
+		expect(md).toContain('业务闭环');
+		expect(md).toContain('原样重发');
+		expect(md).toContain('payload too large');
+		expect(md).toContain('≤120');
+		expect(md).toContain('≤8');
 	});
 
 	it('a second run with unchanged content reports `unchanged` (mtime-stable)', () => {
