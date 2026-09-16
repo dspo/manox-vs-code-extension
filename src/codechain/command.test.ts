@@ -30,6 +30,8 @@ describe('provisionCodeChainCommand (review #12)', () => {
 		expect(md).toContain('$ARGUMENTS');
 		expect(md).toContain('client_GenCodeChain');
 		expect(md).toContain('argument-hint');
+		// The business story is its own step (2b), not folded into the seed.
+		expect(md).toContain('client_NarrateCodeChain');
 		// Progressive-building workflow keywords: the narrative seed, the
 		// Extend block tool, the Expand/Annotate follow-up roles, the business
 		// loop-first reading step, the truncation/re-shard clause, and the

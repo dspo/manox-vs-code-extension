@@ -139,7 +139,9 @@ export const MAX_CHAIN_DEPTH = 4;
 export const MAX_CHAIN_NODES = 48;
 export const MAX_SUMMARY_CHARS = 120;
 /** `CodeChain.narrative` length cap — a 300–600 char story, truncated at
- * 1200 if the model overshoots. */
+ * 1200 if the model overshoots. Committed on its own call
+ * (client_NarrateCodeChain) so the narrative never shares a model-output
+ * budget with the tree it anchors. */
 export const MAX_NARRATIVE_CHARS = 1200;
 /** Per-node story-beat cap (the node's role inside the narrative). */
 export const MAX_BEAT_CHARS = 60;

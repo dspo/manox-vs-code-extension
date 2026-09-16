@@ -1,10 +1,14 @@
-// The five GenCodeChain client tools (§4): their wire specs (what the model
+// The six GenCodeChain client tools (§4): their wire specs (what the model
 // sees) and the invoke handlers (what the host runs when the server routes
-// an `invokeClientTool` ServerCall here). GenCodeChain seeds a spine +
-// narrative; ExtendCodeChainNode grows the tree in ≤ MAX_EXTEND_NODES
-// chunks, so no single payload has to carry a whole business flow (the
-// payload guards below reject oversized drafts with shard guidance instead
-// of letting the server truncate them silently).
+// an `invokeClientTool` ServerCall here). GenCodeChain seeds the spine only;
+// NarrateCodeChain commits the business story as its OWN call and
+// ExtendCodeChainNode grows the tree in ≤ MAX_EXTEND_NODES chunks, so no
+// single payload has to carry a whole business flow AND the story together
+// (the real-model evidence: narrative + tree in one GenCodeChain reply blew
+// the ~5KB qwen3.8-flash output budget through Bailian and cut the stream
+// mid-JSON — splitting the story into a third call keeps every call well
+// under its payload guard, which the guards below enforce with shard
+// guidance instead of letting the server truncate them silently).
 //
 // Reply contract (§9.3, pinned by guards.test): every business outcome —
 // success, self-correction feedback, hard failure — answers through
@@ -65,7 +69,7 @@ export interface ToolSpec {
 // (seed guidance stays TIGHTER than the hard host caps — oversized drafts
 // are truncated with warnings, not rejected).
 const GEN_CODE_CHAIN_DESCRIPTION =
-	"Render an interactive code-reading tour of a business flow. Call this AFTER you have read the relevant code (with read/grep tools) and can explain the flow end-to-end. Output a tree plus a `narrative`. Curation rules, in priority order: (1) BUSINESS LOOP FIRST: include a node only when the step changes or carries business state data — acceptance -> core validation -> state change -> event/settlement -> outlet. Each `summary` (<= 120 chars) says what happens BUSINESS-wise in the user's language, never a restatement of the code. (2) DO NOT DESCEND INTO BOILERPLATE: middleware chains, request-parameter format validation, idempotency checks, audit logging, error wrapping, and DTO conversion must NOT become nodes; if such a step has a genuine business exception, fold it into the parent's summary or `edgeNote` in one sentence. (3) PRUNE BRANCHES: expand only branches whose alternatives differ in business meaning; summarize all error/rollback paths in at most ONE kind='note' node. (4) SIZE: seed the spine only — <= 12 nodes and <= 3 levels (hard caps: " + MAX_CHAIN_NODES + " nodes / 4 levels, over-tall or over-wide drafts are truncated); grow deeper or wider afterwards with client_ExtendCodeChainNode, one chunk of <= " + MAX_EXTEND_NODES + " new nodes per call. (5) `narrative` IS REQUIRED: a 300-600 character coherent business story in markdown (trigger -> key decisions -> state transitions -> external consequences); tree nodes are the anchors of THAT story, not a directory listing. Contract (unchanged): NEVER report line numbers — give `file` (workspace-relative) and `symbol` (exact name, `Class.method` for methods); the host resolves precise locations via LSP and rejects bad ones, so prefer symbols you have actually seen in the files you read. Use kind='note' (no symbol) for conceptual steps with no single code location. If the host returns resolution errors, fix only the failed nodes and call again.";
+	"Render an interactive code-reading tour of a business flow. Call this AFTER you have read the relevant code (with read/grep tools) and can explain the flow end-to-end. Output the tree SPINE only — NOT the narrative (see rule 5). Curation rules, in priority order: (1) BUSINESS LOOP FIRST: include a node only when the step changes or carries business state data — acceptance -> core validation -> state change -> event/settlement -> outlet. Each `summary` (<= 120 chars) says what happens BUSINESS-wise in the user's language, never a restatement of the code. (2) DO NOT DESCEND INTO BOILERPLATE: middleware chains, request-parameter format validation, idempotency checks, audit logging, error wrapping, and DTO conversion must NOT become nodes; if such a step has a genuine business exception, fold it into the parent's summary or `edgeNote` in one sentence. (3) PRUNE BRANCHES: expand only branches whose alternatives differ in business meaning; summarize all error/rollback paths in at most ONE kind='note' node. (4) SIZE: seed the spine only — <= 8 nodes and <= 3 levels, and keep the WHOLE JSON of this call around ~2.5 KB or less (hard caps: " + MAX_CHAIN_NODES + " nodes / 4 levels, over-tall or over-wide drafts are truncated; larger payloads are rejected by the host). Grow deeper or wider afterwards with client_ExtendCodeChainNode, one chunk of <= " + MAX_EXTEND_NODES + " new nodes per call. (5) NARRATIVE IS A SEPARATE CALL: do NOT put a `narrative` field here — right after this seed succeeds, call client_NarrateCodeChain once with the chainId and the 300-600 character coherent business story in markdown (trigger -> key decisions -> state transitions -> external consequences). Tree nodes are the anchors of THAT story, not a directory listing; the story rides its own call so neither the seed nor the narrative has to fit one payload. Contract (unchanged): NEVER report line numbers — give `file` (workspace-relative) and `symbol` (exact name, `Class.method` for methods); the host resolves precise locations via LSP and rejects bad ones, so prefer symbols you have actually seen in the files you read. Use kind='note' (no symbol) for conceptual steps with no single code location. If the host returns resolution errors, fix only the failed nodes and call again.";
 
 const EXPAND_DESCRIPTION =
 	"Expand one node of an existing code chain with REAL call-graph edges resolved by the host via LSP call hierarchy — no guessing, no token cost for reading files. Use when the user asks to go deeper (\"这个函数里面还调了什么\"/\"谁调用了它\") or for a real caller/callee edge you confirmed in code. For a node whose CHILDREN you already read and understood, prefer client_ExtendCodeChainNode (your curated draft subtree, with beats); use this tool when the edge set itself must come from the graph. direction='callees' expands what the node calls; 'callers' expands who calls it. Afterwards use client_AnnotateCodeChainNode to add business meaning to the newly added nodes.";
@@ -82,8 +86,13 @@ const ANNOTATE_DESCRIPTION =
 // smaller chunks via client_ExtendCodeChainNode, summaries <= 120 chars,
 // NEVER the same payload resent.
 
-const MAX_GEN_PAYLOAD_CHARS = 6_000;
-const MAX_EXTEND_PAYLOAD_CHARS = 4_000;
+const MAX_GEN_PAYLOAD_CHARS = 3_000;
+const MAX_EXTEND_PAYLOAD_CHARS = 3_000;
+/** The narrative rides its own call (client_NarrateCodeChain); this guard is
+ * a headroom ceiling well under the model's ~5KB output budget — a story
+ * over MAX_NARRATIVE_CHARS but inside this limit is truncated by the handler,
+ * one past it is rejected with a compress-to-1200 instruction. */
+const MAX_NARRATE_PAYLOAD_CHARS = 2_000;
 
 const payloadTooLarge = (toolName: string, actual: number, limit: number): string =>
 	`payload too large: ${actual} chars exceeds the ${limit} char limit for ${toolName}. Shrink it: keep the whole tree inside one block of <= ${MAX_EXTEND_NODES} new nodes per call (seed the spine with client_GenCodeChain, attach the rest one block at a time via client_ExtendCodeChainNode), keep every \`summary\` <= ${MAX_SUMMARY_CHARS} chars, drop boilerplate steps (middleware, parameter validation, logging, DTO conversion) and the oversized narrative (<= ${MAX_NARRATIVE_CHARS} chars) — NEVER resend the same payload unchanged.`;
@@ -106,19 +115,17 @@ const NODE_PROPERTIES = {
 };
 
 /** The draft-tree JSON Schema (recursion via `$defs`/`$ref` — a JS object
- * literal with a self-reference would break `JSON.stringify` on send). */
+ * literal with a self-reference would break `JSON.stringify` on send). No
+ * `narrative` here: the business story is committed separately with
+ * client_NarrateCodeChain so the seed tree and the story never share one
+ * output-budget-bound payload (see the module header). */
 const draftTreeSchema = {
 	$schema: 'https://json-schema.org/draft/2020-12/schema',
 	type: 'object',
-	required: ['title', 'question', 'narrative', 'root'],
+	required: ['title', 'question', 'root'],
 	properties: {
 		title: { type: 'string', description: 'Short name of the business flow, e.g. "订单创建流程".' },
 		question: { type: 'string', description: "The user's original question." },
-		narrative: {
-			type: 'string',
-			maxLength: MAX_NARRATIVE_CHARS,
-			description: 'The coherent business story this tree anchors (markdown, 300-600 chars).',
-		},
 		root: { $ref: '#/$defs/node' },
 	},
 	$defs: {
@@ -165,12 +172,37 @@ const extendSchema = {
 	},
 };
 
+/** NarrateCodeChain input: the chain id plus the business story alone. Its
+ * own schema (no tree) so the narrative never shares a payload with a draft. */
+const narrateSchema = {
+	$schema: 'https://json-schema.org/draft/2020-12/schema',
+	type: 'object',
+	required: ['chainId', 'narrative'],
+	properties: {
+		chainId: { type: 'string' },
+		narrative: {
+			type: 'string',
+			maxLength: MAX_NARRATIVE_CHARS,
+			description: 'The coherent business story this chain anchors (markdown, 300-600 chars, <= 1200 hard cap).',
+		},
+	},
+};
+
 export function clientToolSpecs(): ToolSpec[] {
 	return [
 		{
 			name: 'GenCodeChain',
 			description: GEN_CODE_CHAIN_DESCRIPTION,
 			inputSchema: draftTreeSchema,
+			readOnly: true,
+		},
+		{
+			name: 'NarrateCodeChain',
+			description:
+				'Commit the business story of an existing code chain — call this right AFTER client_GenCodeChain seeds the spine (the seed call itself carries NO narrative; the story rides this separate call so neither payload has to fit the model output budget together). Pass the `chainId` from the client_GenCodeChain reply and ONLY the narrative text: a 300-600 character coherent business story in markdown (trigger -> key decisions -> state transitions -> external consequences), in the user language, <= ' +
+				MAX_NARRATIVE_CHARS +
+				' chars (longer is truncated). The tree nodes are the anchors of THAT story; write what the spine you just seeded adds up to, not a directory listing. This only sets the narrative — the tree is untouched; re-call to replace the story.',
+			inputSchema: narrateSchema,
 			readOnly: true,
 		},
 		{
@@ -285,6 +317,9 @@ export class CodeChainTools {
 				case 'GenCodeChain':
 					await this.genCodeChain(call, reply);
 					return true;
+				case 'NarrateCodeChain':
+					this.narrateCodeChain(call, reply);
+					return true;
 				case 'ExtendCodeChainNode':
 					await this.extendCodeChain(call, reply);
 					return true;
@@ -316,15 +351,25 @@ export class CodeChainTools {
 		if (this.guardPayload(reply, call.input, MAX_GEN_PAYLOAD_CHARS, 'GenCodeChain')) return;
 		const title = asString(input.title);
 		const question = asString(input.question) ?? '';
-		const narrative = asString(input.narrative) ?? undefined;
+		// The narrative moved to its own call (client_NarrateCodeChain) — the
+		// seed payload must not carry the story too (real-model evidence: a
+		// narrative + tree in one GenCodeChain reply blew the ~5KB output
+		// budget and cut the stream mid-JSON). Reject a stray `narrative`
+		// field so the model self-corrects to the documented split flow.
+		if (input.narrative !== undefined) {
+			return failText(
+				reply,
+				'GenCodeChain no longer accepts a `narrative` field. Seed the spine here, then commit the business story with a separate client_NarrateCodeChain call ({chainId, narrative}) using this reply\'s chainId.',
+			);
+		}
 		const rootParse = parseDraft(input.root, '');
 		if (!title || !rootParse.draft) {
 			return failText(
 				reply,
-				'GenCodeChain requires `title`, `narrative` (the business story), and a `root` node with {id,label,kind,file,summary}; every child needs the same shape',
+				'GenCodeChain requires `title` and a `root` node with {id,label,kind,file,summary}; every child needs the same shape (the narrative is committed separately with client_NarrateCodeChain)',
 			);
 		}
-		const { draft, warnings, narrative: validatedNarrative } = validateDraft(rootParse.draft, narrative);
+		const { draft, warnings } = validateDraft(rootParse.draft);
 		// Malformed nodes `parseDraft` dropped are reported as failures so the
 		// model can repair them (review round-2, issue: they used to vanish
 		// silently while the reply still claimed the tree was fine).
@@ -338,7 +383,6 @@ export class CodeChainTools {
 			title,
 			question,
 			root: draft,
-			...(validatedNarrative !== undefined ? { narrative: validatedNarrative } : {}),
 		});
 		if (dropped.length > 0) {
 			failures.unshift(...dropped);
@@ -368,6 +412,9 @@ export class CodeChainTools {
 			nodeCount: chain.stats.nodeCount,
 			unresolvedCount: chain.stats.unresolvedCount,
 			panelOpened: true,
+			// The spine is up but the story is not: point the model at the two
+			// follow-up calls that stay within one output budget each.
+			nextStep: 'call client_NarrateCodeChain with the business story, then extend with client_ExtendCodeChainNode',
 			...(warnings.length > 0 ? { warnings } : {}),
 			...(failures.length > 0
 				? { note: `${failures.length} node(s) stayed unresolved after ${MAX_CORRECTION_ROUNDS} correction rounds; they render as warnings` }
@@ -383,6 +430,51 @@ export class CodeChainTools {
 			chainId: chain.chainId,
 			title: chain.title,
 			nodeCount: chain.stats.nodeCount,
+		});
+	}
+
+	// ── NarrateCodeChain ──────────────────────────────────────────────────────
+
+	/** Commit the chain's business story on its own — the third payload of the
+	 * progressive flow (seed → narrate → extend), split out so the narrative
+	 * never shares a model-output budget with the tree. Runs NO resolution:
+	 * it just sets `chain.narrative` and re-pushes. `stats` ignore the
+	 * narrative, so `withStats` is a no-op here and a plain spread suffices.
+	 * Over-cap stories are truncated (with a warning) rather than rejected;
+	 * a payload past the headroom guard is refused with a compress-to-cap
+	 * instruction (the story alone must fit this call). */
+	private narrateCodeChain(call: InvokeCall, reply: ReplySinks): void {
+		const loaded = this.chainOf(call, reply, 'NarrateCodeChain');
+		if (!loaded) return;
+		const { input, chain } = loaded;
+		const raw = asString(input.narrative);
+		if (raw === null || raw.trim() === '') {
+			return failText(reply, 'NarrateCodeChain requires a non-empty `narrative` string (the 300-600 char business story)');
+		}
+		// The story ALONE rides this payload; if even that overruns the
+		// headroom guard there is nothing to re-shard — the fix is to compress
+		// the narrative to the cap, not to split the tree (that was Gen's job).
+		const actual = JSON.stringify(call.input ?? null)?.length ?? 0;
+		if (actual > MAX_NARRATE_PAYLOAD_CHARS) {
+			return failText(
+				reply,
+				`payload too large: ${actual} chars exceeds the ${MAX_NARRATE_PAYLOAD_CHARS} char limit for NarrateCodeChain. Compress the \`narrative\` to <= ${MAX_NARRATIVE_CHARS} chars (a tight 300-600 char business story) — the narrative rides this call alone, so there is nothing to re-shard; NEVER resend the same payload unchanged.`,
+			);
+		}
+		const warnings: string[] = [];
+		let narrative = raw;
+		if (raw.length > MAX_NARRATIVE_CHARS) {
+			narrative = `${raw.slice(0, MAX_NARRATIVE_CHARS - 1)}…`;
+			warnings.push(`narrative truncated to ${MAX_NARRATIVE_CHARS} chars`);
+		}
+		const next = { ...chain, narrative };
+		this.store.save(next);
+		this.sinks.updateChain(next);
+		ok(reply, {
+			ok: true,
+			chainId: next.chainId,
+			narrativeChars: narrative.length,
+			...(warnings.length > 0 ? { warnings } : {}),
 		});
 	}
 

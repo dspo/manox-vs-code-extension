@@ -1,8 +1,9 @@
-// The four client tools' reply contract + self-correction loop (§4, §9.3)
+// The six client tools' reply contract + self-correction loop (§4, §9.3)
 // over the FakeLsp fixture: every business outcome answers `reply.ok
 // {content, isError}` — never an RPC Err — so the model reads the structured
 // feedback; a successful GenCodeChain publishes (store + panel + journal
-// verb); bare and `client_`-prefixed names both route.
+// verb); the narrative rides its own NarrateCodeChain call (never the seed);
+// bare and `client_`-prefixed names both route.
 
 import { describe, expect, it } from 'vitest';
 
@@ -118,10 +119,11 @@ function parsed(content: string | undefined): Record<string, unknown> {
 }
 
 describe('client tool specs', () => {
-	it('register all five, read-only, snake_case-ready', () => {
+	it('register all six, read-only, snake_case-ready', () => {
 		const specs = clientToolSpecs();
 		expect(specs.map((s) => s.name)).toEqual([
 			'GenCodeChain',
+			'NarrateCodeChain',
 			'ExtendCodeChainNode',
 			'ExpandCodeChainNode',
 			'AnnotateCodeChainNode',
@@ -131,18 +133,29 @@ describe('client tool specs', () => {
 		// Cross-references between tools use the model-facing prefixed names
 		// (§8 Phase 0 revision): the model never sees the bare registration
 		// name, so the descriptions must not reference it either. The
-		// progressive chain-building pair (Gen ↔ Extend) must point at each
-		// other, and the semantics pair (Expand ↔ Annotate ↔ Extend) too.
+		// progressive chain-building trio (Gen → Narrate → Extend) must point
+		// at each other, and the semantics pair (Expand ↔ Annotate ↔ Extend)
+		// too.
 		expect(specs[0]?.description).toContain('client_ExtendCodeChainNode');
+		// The seed no longer carries the story — it must send the model to the
+		// dedicated narrative tool instead.
+		expect(specs[0]?.description).toContain('client_NarrateCodeChain');
+		// The seed schema dropped the top-level narrative field entirely (the
+		// word still appears inside a node `beat` description — check the shape,
+		// not the string).
+		const genSchema = specs[0]?.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
+		expect(genSchema.properties?.narrative).toBeUndefined();
+		expect(genSchema.required ?? []).not.toContain('narrative');
 		expect(specs[1]?.description).toContain('client_GenCodeChain');
-		expect(specs[2]?.description).toContain('client_AnnotateCodeChainNode');
-		expect(specs[2]?.description).toContain('client_ExtendCodeChainNode');
-		expect(specs[3]?.description).toContain('client_ExpandCodeChainNode');
+		expect(specs[2]?.description).toContain('client_GenCodeChain');
+		expect(specs[3]?.description).toContain('client_AnnotateCodeChainNode');
 		expect(specs[3]?.description).toContain('client_ExtendCodeChainNode');
+		expect(specs[4]?.description).toContain('client_ExpandCodeChainNode');
+		expect(specs[4]?.description).toContain('client_ExtendCodeChainNode');
 		for (const spec of specs) {
 			// A bare (unprefixed) tool name would be a name the model can
 			// never call — reject it in every description.
-			expect(spec.description).not.toMatch(/(^|[^_A-Za-z])(GenCodeChain|ExtendCodeChainNode|ExpandCodeChainNode|AnnotateCodeChainNode|RefreshCodeChain)(?!_)/);
+			expect(spec.description).not.toMatch(/(^|[^_A-Za-z])(GenCodeChain|NarrateCodeChain|ExtendCodeChainNode|ExpandCodeChainNode|AnnotateCodeChainNode|RefreshCodeChain)(?!_)/);
 		}
 	});
 });
@@ -156,7 +169,7 @@ describe('GenCodeChain', () => {
 		const out = r.calls[0];
 		expect(out?.err).toBeUndefined();
 		expect(out?.isError).toBe(false);
-		expect(parsed(out?.content)).toMatchObject({ ok: true, chainId: 'cc-1', nodeCount: 1, unresolvedCount: 0 });
+		expect(parsed(out?.content)).toMatchObject({ ok: true, chainId: 'cc-1', nodeCount: 1, unresolvedCount: 0, nextStep: expect.stringContaining('client_NarrateCodeChain') });
 		expect(store.get('cc-1')?.title).toBe('流程');
 		expect(shown).toHaveLength(1);
 		expect(verbs[0]).toMatchObject({ sessionId: 's1', chainId: 'cc-1', nodeCount: 1 });
@@ -206,8 +219,24 @@ describe('GenCodeChain', () => {
 		expect(r.calls[0]?.content).toContain('requires');
 	});
 
-	it('a seeded narrative rides the chain AND the panel push', async () => {
-		const { tools, store, shown, reply } = makeTools();
+	// The tightened seed budget (6000 → 3000): a ~3.5KB draft now trips the
+	// guard where the old limit would have let it through and blown the model's
+	// ~5KB output budget once the reply came back.
+	it('a 3.5KB seed draft is rejected under the tightened 3000-char budget', async () => {
+		const { tools, shown, reply } = makeTools();
+		const r = reply();
+		await tools.handle(
+			call('GenCodeChain', { title: 't', question: 'q', root: { ...okRoot, summary: 's'.repeat(3_400) } }),
+			r.sinks,
+		);
+		expect(r.calls[0]?.isError).toBe(true);
+		expect(r.calls[0]?.content).toContain('payload too large');
+		expect(r.calls[0]?.content).toContain('3000 char limit');
+		expect(shown).toHaveLength(0);
+	});
+
+	it('rejects a stray `narrative` field and routes the model to client_NarrateCodeChain', async () => {
+		const { tools, shown, store, reply } = makeTools();
 		const r = reply();
 		await tools.handle(
 			call('GenCodeChain', {
@@ -218,17 +247,101 @@ describe('GenCodeChain', () => {
 			}),
 			r.sinks,
 		);
-		expect(r.calls[0]?.isError).toBe(false);
-		expect(store.get('cc-1')?.narrative).toBe('用户发起下单，系统先校验库存再落库广播。');
-		expect(shown[0]?.narrative).toBe('用户发起下单，系统先校验库存再落库广播。');
+		expect(r.calls[0]?.isError).toBe(true);
+		expect(r.calls[0]?.content).toContain('client_NarrateCodeChain');
+		// Rejected before resolving: nothing published.
+		expect(shown).toHaveLength(0);
+		expect(store.get('cc-1')).toBeUndefined();
 	});
 
-	it('an omitted narrative keeps the field off the wire (old-chain compat)', async () => {
+	it('seeds the spine with NO narrative — the field stays off the chain (split flow)', async () => {
 		const { tools, store, reply } = makeTools();
 		const r = reply();
 		await tools.handle(call('GenCodeChain', { title: 't', question: 'q', root: okRoot }), r.sinks);
 		expect(r.calls[0]?.isError).toBe(false);
 		expect('narrative' in (store.get('cc-1') ?? {})).toBe(false);
+	});
+});
+
+// The business story is its own call (the real-model fix: a narrative + tree
+// in one GenCodeChain reply blew the ~5KB output budget mid-JSON). Narrate
+// runs no resolution — it just sets `chain.narrative`, re-saves, and re-pushes
+// the open panel; over-cap stories truncate with a warning, an oversized
+// payload is refused with a compress-to-cap instruction.
+describe('NarrateCodeChain', () => {
+	async function genOk() {
+		const t = makeTools();
+		const r = t.reply();
+		await t.tools.handle(call('GenCodeChain', { title: 't', question: 'q', root: okRoot }), r.sinks);
+		expect(r.calls[0]?.isError).toBe(false);
+		return t;
+	}
+
+	it('commits the narrative on the chain AND the panel update (no re-resolve)', async () => {
+		const t = await genOk();
+		const r = t.reply();
+		await t.tools.handle(
+			call('client_NarrateCodeChain', { chainId: 'cc-1', narrative: '用户发起下单，系统先校验库存再落库广播。' }),
+			r.sinks,
+		);
+		expect(r.calls[0]?.isError).toBe(false);
+		expect(parsed(r.calls[0]?.content)).toMatchObject({ ok: true, chainId: 'cc-1', narrativeChars: 20 });
+		expect(t.store.get('cc-1')?.narrative).toBe('用户发起下单，系统先校验库存再落库广播。');
+		// The update sink fires (panel refresh); Gen's show was NOT repeated.
+		expect(t.updated).toHaveLength(1);
+		expect(t.updated[0]?.narrative).toBe('用户发起下单，系统先校验库存再落库广播。');
+		expect(t.shown).toHaveLength(1);
+	});
+
+	it('truncates an over-cap story to MAX_NARRATIVE_CHARS with a warning', async () => {
+		const t = await genOk();
+		const r = t.reply();
+		await t.tools.handle(
+			call('NarrateCodeChain', { chainId: 'cc-1', narrative: 'x'.repeat(1_500) }),
+			r.sinks,
+		);
+		expect(r.calls[0]?.isError).toBe(false);
+		const body = parsed(r.calls[0]?.content);
+		expect(body.narrativeChars).toBe(1_200);
+		expect((body.warnings as string[]).some((w) => w.includes('narrative truncated'))).toBe(true);
+		expect(t.store.get('cc-1')?.narrative?.length).toBe(1_200);
+	});
+
+	it('a payload past the 2000-char headroom guard answers the compress-to-cap instruction', async () => {
+		const t = await genOk();
+		const r = t.reply();
+		// ~1990-char narrative: serialized payload >2000 chars (chainId + json
+		// overhead), past the headroom guard even though it is inside 1200… no,
+		// it is over 1200 too — the guard fires FIRST, before truncation.
+		await t.tools.handle(
+			call('NarrateCodeChain', { chainId: 'cc-1', narrative: 'y'.repeat(1_990) }),
+			r.sinks,
+		);
+		expect(r.calls[0]?.isError).toBe(true);
+		const msg = r.calls[0]?.content ?? '';
+		expect(msg).toContain('payload too large');
+		expect(msg).toContain('2000 char limit');
+		expect(msg).toContain('Compress');
+		// Rejected before touching the chain.
+		expect(t.store.get('cc-1')?.narrative).toBeUndefined();
+	});
+
+	it('missing chainId answers without hanging (review #5)', async () => {
+		const { tools, reply } = makeTools();
+		const r = reply();
+		const handled = await tools.handle(call('NarrateCodeChain', { narrative: '故事' }), r.sinks);
+		expect(handled).toBe(true);
+		expect(r.calls).toHaveLength(1);
+		expect(r.calls[0]?.isError).toBe(true);
+		expect(r.calls[0]?.content).toContain('chainId');
+	});
+
+	it('an empty narrative answers isError', async () => {
+		const t = await genOk();
+		const r = t.reply();
+		await t.tools.handle(call('NarrateCodeChain', { chainId: 'cc-1', narrative: '   ' }), r.sinks);
+		expect(r.calls[0]?.isError).toBe(true);
+		expect(r.calls[0]?.content).toContain('narrative');
 	});
 });
 
@@ -313,7 +426,7 @@ describe('ExtendCodeChainNode', () => {
 		expect(t.updated).toHaveLength(1);
 	});
 
-	it('a narrative in the block overrides the chain story; an omitted one keeps it', async () => {
+	it('an Extend block may still replace the chain story; an omitted one keeps it', async () => {
 		const eventChild: ChainNodeDraft = {
 			id: 'event.emitted',
 			label: 'emitOrderCreated',
@@ -324,10 +437,11 @@ describe('ExtendCodeChainNode', () => {
 		};
 		const t = makeTools();
 		const g = t.reply();
-		await t.tools.handle(
-			call('GenCodeChain', { title: 't', question: 'q', narrative: '旧版故事', root: okRoot }),
-			g.sinks,
-		);
+		await t.tools.handle(call('GenCodeChain', { title: 't', question: 'q', root: okRoot }), g.sinks);
+		// Seed the story through the dedicated narrative tool, not Gen.
+		const gn = t.reply();
+		await t.tools.handle(call('NarrateCodeChain', { chainId: 'cc-1', narrative: '旧版故事' }), gn.sinks);
+		expect(gn.calls[0]?.isError).toBe(false);
 		// No narrative on the block → the stored story is untouched.
 		const r1 = t.reply();
 		await t.tools.handle(
@@ -349,7 +463,9 @@ describe('ExtendCodeChainNode', () => {
 		);
 		expect(r2.calls[0]?.isError).toBe(false);
 		expect(t.store.get('cc-1')?.narrative).toBe('新版故事');
-		expect(t.updated[1]?.narrative).toBe('新版故事');
+		// updated[0] = the Narrate push, updated[1] = first extend, updated[2] =
+		// this extend (carrying the new story).
+		expect(t.updated[2]?.narrative).toBe('新版故事');
 	});
 
 	it('payload guard: an oversized GenCodeChain draft answers with the size + shard recipe', async () => {
@@ -367,6 +483,7 @@ describe('ExtendCodeChainNode', () => {
 		const msg = r.calls[0]?.content ?? '';
 		expect(msg).toContain('payload too large');
 		expect(msg).toMatch(/7\d{3} chars/); // the ACTUAL serialized size
+		expect(msg).toContain('3000 char limit'); // the TIGHTENED seed budget
 		expect(msg).toContain('client_ExtendCodeChainNode');
 		expect(msg).toContain('120'); // summary cap in the recipe
 	});
@@ -386,6 +503,7 @@ describe('ExtendCodeChainNode', () => {
 		const msg = r.calls[0]?.content ?? '';
 		expect(msg).toContain('payload too large');
 		expect(msg).toMatch(/5\d{3} chars/);
+		expect(msg).toContain('3000 char limit'); // the TIGHTENED extend budget
 		expect(msg).toContain('client_ExtendCodeChainNode');
 		// The guard rejects BEFORE resolving: no panel update.
 		expect(t.updated).toHaveLength(0);
