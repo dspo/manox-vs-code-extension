@@ -141,8 +141,8 @@ describe('client tool specs', () => {
 		// The seed no longer carries the story — it must send the model to the
 		// dedicated narrative tool instead.
 		expect(specs[0]?.description).toContain(`client_${TOOL_NAMES.narrate}`);
-		// The default build path is node-by-node: Gen's whole-tree seed is
-		// demoted to a large-budget shortcut and points the model at Add.
+		// The default build path is node-by-node: the seed points the model at
+		// Add for every following step.
 		expect(specs[0]?.description).toContain(`client_${TOOL_NAMES.add}`);
 		// The seed schema dropped the top-level narrative field entirely (the
 		// word still appears inside a node `beat` description — check the shape,
@@ -150,6 +150,17 @@ describe('client tool specs', () => {
 		const genSchema = specs[0]?.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
 		expect(genSchema.properties?.narrative).toBeUndefined();
 		expect(genSchema.required ?? []).not.toContain('narrative');
+		// The seed `root` is a SINGLE entry node, not a recursive tree: it
+		// points at `$defs.entryNode`, which carries NO `children` (that
+		// recursive face was the residual mid-JSON truncation source — the
+		// model kept packing a multi-node spine into the one seed call).
+		const entrySchema = specs[0]?.inputSchema as {
+			properties?: { root?: { $ref?: string } };
+			$defs?: Record<string, { properties?: Record<string, unknown> }>;
+		};
+		expect(entrySchema.properties?.root?.$ref).toBe('#/$defs/entryNode');
+		expect(entrySchema.$defs?.entryNode?.properties?.children).toBeUndefined();
+		expect(entrySchema.$defs?.node).toBeUndefined();
 		expect(specs[1]?.description).toContain(`client_${TOOL_NAMES.entry}`);
 		expect(specs[2]?.description).toContain(`client_${TOOL_NAMES.entry}`);
 		// Add (index 3) is the default one-node-per-call path and must
@@ -172,7 +183,7 @@ describe('client tool specs', () => {
 });
 
 describe('TutorEntry (chain seed)', () => {
-	it('a fully-resolved tree publishes store + panel + journal verb', async () => {
+	it('a single entry node publishes store + panel + journal verb', async () => {
 		const { tools, store, shown, verbs, reply } = makeTools();
 		const r = reply();
 		const handled = await tools.handle(call(TOOL_NAMES.entry, { title: '流程', question: 'q', root: okRoot }), r.sinks);
@@ -180,8 +191,18 @@ describe('TutorEntry (chain seed)', () => {
 		const out = r.calls[0];
 		expect(out?.err).toBeUndefined();
 		expect(out?.isError).toBe(false);
-		expect(parsed(out?.content)).toMatchObject({ ok: true, chainId: 'cc-1', nodeCount: 1, unresolvedCount: 0, nextStep: expect.stringContaining(`client_${TOOL_NAMES.narrate}`) });
+		expect(parsed(out?.content)).toMatchObject({
+			ok: true,
+			chainId: 'cc-1',
+			nodeId: 'handler.create',
+			nodeCount: 1,
+			unresolvedCount: 0,
+			nextStep: expect.stringContaining(`client_${TOOL_NAMES.narrate}`),
+		});
+		// The next step is the node-by-node path, not a whole tree.
+		expect(parsed(out?.content).nextStep).toContain(`client_${TOOL_NAMES.add}`);
 		expect(store.get('cc-1')?.title).toBe('流程');
+		expect(store.get('cc-1')?.root.children).toEqual([]);
 		expect(shown).toHaveLength(1);
 		expect(verbs[0]).toMatchObject({ sessionId: 's1', chainId: 'cc-1', nodeCount: 1 });
 	});
@@ -194,11 +215,53 @@ describe('TutorEntry (chain seed)', () => {
 		expect(r.calls[0]?.isError).toBe(false);
 	});
 
-	it('a resolution failure answers isError with per-node reasons (§4)', async () => {
+	// The structural fix (real-model root cause): qwen3.8-flash's per-call
+	// valid JSON space is under 1KB (observed cut points 3423 / 5334 columns),
+	// so a `root` that ALLOWS a tree trains the model to pack a multi-node
+	// spine into the seed call and truncate mid-JSON. The schema now exposes
+	// only a single entry node and the handler REJECTS `children` outright — a
+	// lenient drop would hide the misuse, so rejection is the contract.
+	it('a `root` carrying children answers isError with the single-node recipe', async () => {
+		const { tools, shown, store, reply } = makeTools();
+		const r = reply();
+		const handled = await tools.handle(
+			call(TOOL_NAMES.entry, {
+				title: 't',
+				question: 'q',
+				root: { ...okRoot, children: [okChildWithId('second')] },
+			}),
+			r.sinks,
+		);
+		expect(handled).toBe(true);
+		expect(r.calls[0]?.err).toBeUndefined();
+		expect(r.calls[0]?.isError).toBe(true);
+		const msg = r.calls[0]?.content ?? '';
+		expect(msg).toContain(`client_${TOOL_NAMES.entry}`);
+		expect(msg).toContain('SINGLE entry node');
+		expect(msg).toContain('children');
+		expect(msg).toContain(`client_${TOOL_NAMES.add}`);
+		// Rejected before resolving: nothing published, nothing stored.
+		expect(shown).toHaveLength(0);
+		expect(store.get('cc-1')).toBeUndefined();
+	});
+
+	it('an empty `children` array on `root` is rejected too (a lenient drop would not train sharding)', async () => {
 		const { tools, shown, reply } = makeTools();
 		const r = reply();
 		await tools.handle(
-			call(TOOL_NAMES.entry, { title: 't', question: 'q', root: { ...okRoot, children: [failingChild] } }),
+			call(TOOL_NAMES.entry, { title: 't', question: 'q', root: { ...okRoot, children: [] } }),
+			r.sinks,
+		);
+		expect(r.calls[0]?.isError).toBe(true);
+		expect(r.calls[0]?.content).toContain('SINGLE entry node');
+		expect(shown).toHaveLength(0);
+	});
+
+	it('a single entry node whose symbol fails drives the correction loop with a single-node hint (§4)', async () => {
+		const { tools, shown, reply } = makeTools();
+		const r = reply();
+		await tools.handle(
+			call(TOOL_NAMES.entry, { title: 't', question: 'q', root: { ...failingChild, kind: 'entry' } }),
 			r.sinks,
 		);
 		const out = r.calls[0];
@@ -206,16 +269,18 @@ describe('TutorEntry (chain seed)', () => {
 		const body = parsed(out?.content);
 		expect(body.ok).toBe(false);
 		expect(body.failures).toEqual([{ nodeId: 'ghost', reason: expect.any(String) }]);
+		expect(body.hint).toContain('single corrected entry node');
 		expect(shown).toHaveLength(0); // not published while correcting
 	});
 
 	it('after 3 correction rounds renders anyway with a note (§4 upper bound)', async () => {
 		const { tools, shown, store, reply } = makeTools();
-		const root = { ...okRoot, children: [failingChild] };
+		const root = { ...failingChild, kind: 'entry' as const };
 		for (let i = 0; i < 4; i += 1) {
 			const r = reply();
 			await tools.handle(call(TOOL_NAMES.entry, { title: 't', question: 'q', root }), r.sinks);
 			if (i < 3) expect(r.calls[0]?.isError).toBe(true);
+			else expect(r.calls[0]?.isError).toBe(false);
 		}
 		// The 4th attempt (rounds exhausted) publishes with an unresolved note.
 		expect(shown).toHaveLength(1);
@@ -265,7 +330,7 @@ describe('TutorEntry (chain seed)', () => {
 		expect(store.get('cc-1')).toBeUndefined();
 	});
 
-	it('seeds the spine with NO narrative — the field stays off the chain (split flow)', async () => {
+	it('seeds a single entry node with NO narrative — the field stays off the chain (split flow)', async () => {
 		const { tools, store, reply } = makeTools();
 		const r = reply();
 		await tools.handle(call(TOOL_NAMES.entry, { title: 't', question: 'q', root: okRoot }), r.sinks);
@@ -846,11 +911,13 @@ describe('every tool answers non-object / missing-chainId input (review #5)', ()
 	}
 });
 
-// Review round-2 (issue): a malformed CHILD node used to be dropped by
-// `parseDraft` with no trace, so the model got `ok:true` for a tree that had
-// quietly lost nodes — it could never repair what it didn't know was gone.
-describe('TutorEntry reports dropped malformed children', () => {
-	it('a child missing `kind` is dropped and surfaced as a failure with a path', async () => {
+// TutorEntry now refuses a tree outright, so the review-round-2 "silently-
+// dropped malformed child" failure mode is structurally gone: any `root`
+// carrying `children` — well-formed or not — is rejected BEFORE resolution
+// with the single-entry-node recipe, so the model never sees a false `ok:true`
+// for a tree it thought it seeded.
+describe('TutorEntry rejects any children instead of silently dropping them', () => {
+	it('a malformed child no longer vanishes — the whole call is refused with the single-node guidance', async () => {
 		const { tools, shown, reply } = makeTools();
 		const r = reply();
 		await tools.handle(
@@ -867,16 +934,13 @@ describe('TutorEntry reports dropped malformed children', () => {
 			}),
 			r.sinks,
 		);
-		const out = r.calls[0];
-		expect(out?.isError).toBe(true);
-		const body = parsed(out?.content);
+		expect(r.calls[0]?.isError).toBe(true);
+		expect(r.calls[0]?.content).toContain('SINGLE entry node');
+		expect(r.calls[0]?.content).toContain(`client_${TOOL_NAMES.add}`);
 		expect(shown).toHaveLength(0);
-		const failures = body.failures as { nodeId: string }[];
-		// The dropped node is identified by a tree path, not silently gone.
-		expect(failures.some((f) => f.nodeId.includes('children[1]'))).toBe(true);
 	});
 
-	it('a child with an out-of-vocabulary kind is dropped and reported', async () => {
+	it('an out-of-vocabulary kind is refused the same way (whole-tree rejection, not a per-node drop report)', async () => {
 		const { tools, reply } = makeTools();
 		const r = reply();
 		await tools.handle(
@@ -890,8 +954,8 @@ describe('TutorEntry reports dropped malformed children', () => {
 			}),
 			r.sinks,
 		);
-		const body = parsed(r.calls[0]?.content);
-		expect(body.failures).toEqual(expect.arrayContaining([expect.objectContaining({ nodeId: expect.stringContaining('children[0]') })]));
+		expect(r.calls[0]?.isError).toBe(true);
+		expect(r.calls[0]?.content).toContain('children');
 	});
 });
 
