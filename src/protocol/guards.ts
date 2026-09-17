@@ -27,6 +27,7 @@ export const HOST_EVENT_TYPES: ReadonlySet<string> = new Set([
 	'error',
 	'projects',
 	'terminalsUpdated',
+	'workspaceUpdate',
 ]);
 
 /** Retained `ServerNote` method surface (§D.6 as-built: owner control, list
