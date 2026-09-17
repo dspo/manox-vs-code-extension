@@ -60,15 +60,10 @@ export const ConversationEmptyState = ({
   </div>
 );
 
-export type ConversationScrollButtonProps = ComponentProps<typeof Button> & {
-  /** Right inset of the scrollable content (floating info card gutter);
-   * keeps the button centered on the messages rather than the container. */
-  rightInsetPx?: number;
-};
+export type ConversationScrollButtonProps = ComponentProps<typeof Button>;
 
 export const ConversationScrollButton = ({
   className,
-  rightInsetPx,
   ...props
 }: ConversationScrollButtonProps) => {
   const { isAtBottom, scrollToBottom } = useStickToBottomContext();
@@ -85,7 +80,6 @@ export const ConversationScrollButton = ({
           'absolute bottom-4 left-[50%] translate-x-[-50%] rounded-full bg-background hover:bg-muted',
           className,
         )}
-        style={rightInsetPx ? { left: `calc(50% - ${rightInsetPx / 2}px)` } : undefined}
         onClick={handleScrollToBottom}
         size="icon"
         type="button"
