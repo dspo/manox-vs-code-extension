@@ -1,7 +1,8 @@
 // Conversation view: header, transcript, error banner, and the composer
 // pinned beneath the transcript. The layout widens in steps with the
-// container: the conversation alone, then the conversation info card
-// floats over the transcript, then the session list joins on the left.
+// container: the conversation alone, then the session list joins on the left.
+// The conversation-info card is NOT a layout step — it is an overlay opened
+// from the header chip, so the transcript always uses its full width.
 
 import { ArrowLeft } from 'lucide-react';
 import { memo, useEffect, useMemo, useRef } from 'react';
@@ -9,7 +10,7 @@ import { memo, useEffect, useMemo, useRef } from 'react';
 import type { CommandEntry, ModelInfo, ThreadListItem } from '../../../protocol';
 import { api, onOpenTurnNavigator, ThreadApi } from '../api/client';
 import { t } from '../lib/i18n';
-import { chatLayoutForWidth, INFO_CARD_GUTTER_PX, maxSessionListWidth } from '../lib/layout';
+import { chatLayoutForWidth, maxSessionListWidth } from '../lib/layout';
 import { collectUserTurns } from '../lib/turn-nav';
 import { useContainerWidth } from '../lib/use-container-width';
 import { setOverlayOpen, toggleOverlay, useOverlayOpen } from '../lib/ui-overlays';
@@ -104,7 +105,7 @@ export const ConversationView = memo(({
   return (
     <div ref={containerRef} className="font-chrome flex h-screen flex-col bg-background text-foreground">
       <div className="flex items-center gap-1 border-b px-2 py-1.5">
-        {layout !== 'list-conversation-info' && (
+        {layout !== 'list-conversation' && (
           <Button onClick={backToList} size="icon-sm" title={t('back_to_threads')} variant="ghost">
             <ArrowLeft className="size-4" />
           </Button>
@@ -121,7 +122,7 @@ export const ConversationView = memo(({
       </div>
       {thread.planMode && <PlanModeBanner sessionId={thread.sessionId} />}
       <div className="flex min-h-0 flex-1">
-        {layout === 'list-conversation-info' && (
+        {layout === 'list-conversation' && (
           <>
             <div className="flex min-w-0 flex-col" style={{ width: listWidth }}>
               <SessionList
@@ -157,16 +158,15 @@ export const ConversationView = memo(({
               items={thread.items}
               lastTurnDurationSec={thread.lastTurnDurationSec}
               models={models}
-              rightInsetPx={layout !== 'conversation' ? INFO_CARD_GUTTER_PX : undefined}
               sessionId={thread.sessionId}
               turnActive={thread.turnActive}
             />
-            {/* The info card is no longer rendered inline here: its entry chip
-             * (and the card itself) is contributed through the
-             * `conversation.session.header.utilities` slot by the
-             * conversation-info plugin (T8 §H). The `rightInsetPx` gutter above
-             * still reserves the card's column so the transcript never
-             * reflows when the card opens. */}
+            {/* No info-card gutter: the card is an OVERLAY opened from the
+             * header chip (the conversation-info plugin), so it sits on top of
+             * the transcript rather than beside it and the rows must use the
+             * full width. Reserving the card's column here left a wide empty
+             * strip down the right of every message for a card that is usually
+             * closed. */}
             {navigatorOpen && (
               <div
                 className="absolute inset-0 z-10 flex items-center justify-center bg-background/60"

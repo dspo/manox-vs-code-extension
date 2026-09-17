@@ -1,11 +1,14 @@
 // Sidebar host: a transparent typed relay between the webview renderer and
 // the shared agent host. The webview speaks `FromClient` / `FromServer`
 // directly: the host forwards the webview's frames to the napi connection and
-// relays EVERY guard-parsed `FromServer` frame back unfiltered — the webview
-// bundle (webview-ui/, the React frontend) owns frame interpretation and
-// answers adjudication `request` frames itself. Session lifecycle rides the
-// wire too; the only host→webview out-of-band messages are the boot facts,
-// settings pushes, and UI verbs the sandbox cannot fulfill itself.
+// relays every guard-parsed `FromServer` frame back — the webview bundle
+// (webview-ui/, the React frontend) owns frame interpretation and answers
+// adjudication `request` frames itself. The ONE frame the host rewrites is the
+// threads registry, which it scopes to this workspace
+// (`workspaceFilter.ts`) so the list shows this repository's conversations
+// rather than every thread in the shared `~/.manox` store. Session lifecycle
+// rides the wire too; the only host→webview out-of-band messages are the boot
+// facts, settings pushes, and UI verbs the sandbox cannot fulfill itself.
 //
 // ServerCall ownership: the webview claims sessions by opening follow
 // streams (`streamOpen`); the host registers a no-op handler per claimed
@@ -25,6 +28,7 @@ import {
 } from '../codechain/registration';
 import { errorText } from '../util';
 import type { FromClient, FromServer } from '../protocol/types';
+import { threadsOf, withThreads, WorkspaceThreadFilter } from './workspaceFilter';
 
 /** Webview → host messages: raw protocol frames plus diagnostics. The
  * `viewing` verb is retained as a shield registration for compatibility;
@@ -87,8 +91,52 @@ class ManoxSidebarProvider implements vscode.WebviewViewProvider {
 	private readonly streams = new Map<string, string>();
 	/** Sessions holding a no-op ServerCall shield (webview answers them). */
 	private readonly shielded = new Set<string>();
+	/** Workspace scoping for the threads list (worktree-aware, memoized). */
+	private readonly workspaceFilter = new WorkspaceThreadFilter(undefined, (m) =>
+		console.log(`manox sidebar: ${m}`),
+	);
+	/** Monotonic relay sequence (see `relay`). */
+	private relaySeq = 0;
 
 	constructor(private readonly context: vscode.ExtensionContext) {}
+
+	/** Relay one server frame, scoping the threads registry to this workspace.
+	 *
+	 * The threads list is the ONE frame the extension rewrites: `~/.manox` is
+	 * shared with the desktop app, so the raw registry carries every thread on
+	 * the machine. See `workspaceFilter.ts` for the rule (this workspace's
+	 * repository, worktrees included).
+	 *
+	 * Ordering: rewriting is async (git lookups), and the registry is a FULL
+	 * MIRROR — a `threadsUpdated` frame always replaces the previous list — so
+	 * a slow rewrite must not be overtaken by a newer one, or the list would
+	 * settle on stale rows. A monotonic sequence drops any frame that lost the
+	 * race; the newest frame is always the one that lands. */
+	private relay(frame: FromServer): void {
+		const rows = threadsOf(frame);
+		if (!rows) {
+			this.post({ t: 'frame', frame });
+			return;
+		}
+		const seq = ++this.relaySeq;
+		void this.workspaceFilter
+			.ownedBy(rows, resolveWorkspaceCwd())
+			.then((kept) => {
+				if (seq !== this.relaySeq) return;
+				this.post({
+					t: 'frame',
+					frame: withThreads(frame, kept) as FromServer,
+				});
+			})
+			.catch((e: unknown) => {
+				// Fail OPEN: a filter failure must never blank the sidebar.
+				// The unfiltered list is what this extension shipped before,
+				// so it is the safe degradation, not a regression.
+				console.log(`manox sidebar: workspace filter failed: ${errorText(e)}`);
+				if (seq !== this.relaySeq) return;
+				this.post({ t: 'frame', frame });
+			});
+	}
 
 	resolveWebviewView(webviewView: vscode.WebviewView): void {
 		this.view = webviewView;
@@ -111,9 +159,7 @@ class ManoxSidebarProvider implements vscode.WebviewViewProvider {
 			// The code-chain service rides the first live host (§9.2 replay
 			// needs a connection to observe); idempotent across views.
 			ensureCodeChain(this.context, host);
-			this.unsubscribeFrames = host.connection.onFrame((frame) =>
-				this.post({ t: 'frame', frame }),
-			);
+			this.unsubscribeFrames = host.connection.onFrame((frame) => this.relay(frame));
 			// Boot facts the webview cannot read from inside its sandbox.
 			this.post({
 				t: 'boot',
