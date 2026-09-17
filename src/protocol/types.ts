@@ -78,7 +78,39 @@ export type ClientCall =
 			initialModel?: ModelRef;
 			approvalMode?: string;
 			reasoningEffort?: string;
-	  };
+	  }
+	| { method: 'workspace'; call: WorkspaceCall };
+
+// ── Workspace namespace (tag `verb` / `type`) — the durable directory
+// identity registry (dsh workspace parity) ─────────────────────────────────
+
+export type WorkspaceCall =
+	| { verb: 'list' }
+	| { verb: 'create'; path: string }
+	| { verb: 'rename'; workspaceId: string; title: string }
+	| { verb: 'delete'; workspaceId: string }
+	| { verb: 'insertBefore'; workspaceId: string; before?: string | null }
+	| { verb: 'attachSession'; workspaceId: string; sessionId: string }
+	| { verb: 'insertSessionBefore'; workspaceId: string; sessionId: string; before?: string | null }
+	| { verb: 'detachSession'; workspaceId: string; sessionId: string }
+	| { verb: 'archiveSession'; sessionId: string; archived: boolean }
+	| { verb: 'status'; workspaceId: string };
+
+export interface WorkspaceWire {
+	workspaceId: string;
+	path: string;
+	title: string;
+	sessionIds: string[];
+	createdAt: string;
+	updatedAt: string;
+}
+
+export type WorkspaceWireEvent =
+	| { type: 'baseline'; workspaces: WorkspaceWire[]; archivedSessionIds: string[] }
+	| { type: 'upsert'; workspace: WorkspaceWire }
+	| { type: 'remove'; workspaceId: string }
+	| { type: 'order'; workspaceIds: string[] }
+	| { type: 'archived'; archivedSessionIds: string[] };
 
 /** One embedder-registered tool (`RegisterSessionTools`). The Rust struct
  * carries no `rename_all` (crates/manox-protocol/src/client.rs), so the wire
@@ -179,9 +211,10 @@ export type HostEvent =
 			backgroundWork?: boolean;
 	  }
 	| { type: 'sessionCreated'; sessionId: string; header: ThreadHeader }
-	| { type: 'sessionDisposed'; sessionId: string }
+	| { type: 'sessionDisposed'; sessionId: string; successor?: string | null }
 	| { type: 'error'; message: string; sessionId: string | null }
 	| { type: 'projects'; known: string[] }
+	| { type: 'workspaceUpdate'; event: WorkspaceWireEvent }
 	| { type: 'terminalsUpdated'; terminals: TerminalSummary[] };
 
 export interface TerminalSummary {

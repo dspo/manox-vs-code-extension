@@ -121,6 +121,17 @@ describe('parseFromServer tolerates the declared vocabulary only', () => {
 			{ kind: 'request', id: 'a', call: { method: 'approve', deliveryId: 'd', sessionId: 's', authId: 'x', toolName: 'bash', summary: '', input: {} } },
 			{ kind: 'notification', note: { method: 'ready' } },
 			{ kind: 'host', host: { type: 'ready', epoch: 6 } },
+			{
+				kind: 'host',
+				host: {
+					type: 'workspaceUpdate',
+					event: { type: 'baseline', workspaces: [], archivedSessionIds: [] },
+				},
+			},
+			{
+				kind: 'host',
+				host: { type: 'sessionDisposed', sessionId: 's', successor: 's2' },
+			},
 			{ kind: 'streamItem', streamId: 'st', frame: { type: 'entry', seq: 1, id: 'e-1', parentId: null, timestamp: '', event: { type: 'turnStart' } } },
 			{ kind: 'streamEnd', streamId: 'st', reason: { type: 'resync' } },
 		];

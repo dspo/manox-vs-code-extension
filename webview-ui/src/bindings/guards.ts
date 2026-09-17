@@ -29,6 +29,18 @@ export function exactKeys(v: unknown, keys: readonly string[]): boolean {
   return keys.every((k) => k in v);
 }
 
+/** Exact-keys with optional keys: every own key must be required or optional,
+ * and every required key must be present. */
+export function keysWithin(
+  v: unknown,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): boolean {
+  if (!isRecord(v)) return false;
+  if (!required.every((k) => k in v)) return false;
+  return Object.keys(v).every((k) => required.includes(k) || optional.includes(k));
+}
+
 // ── declared surfaces (mirrored; source of truth: src/surface.rs) ──────────
 
 /** §C.2 journal entry tags (JOURNAL_ENTRIES in src/surface.rs). */
@@ -46,7 +58,8 @@ export const JOURNAL_ENTRY_TAGS: readonly string[] = [
 /** §D.5 host event tags (HOST_EVENTS in src/surface.rs). */
 export const HOST_EVENT_TAGS: readonly string[] = [
   'ready', 'models', 'commands', 'threadsUpdated', 'sessionStatus',
-  'sessionCreated', 'sessionDisposed', 'error', 'projects', 'terminalsUpdated',
+  'sessionCreated', 'sessionDisposed', 'workspaceUpdate', 'error', 'projects',
+  'terminalsUpdated',
 ];
 
 export const isKnownJournalTag = (tag: unknown): tag is string =>
@@ -179,7 +192,11 @@ export function parseHostEvent(v: unknown): Guard<HostEventShape> {
       'pendingPlan', 'backgroundWork',
     ],
     sessionCreated: ['type', 'sessionId', 'header'],
+    // Bind identity hand-off: the successor rides ONLY that frame
+    // (`skip_serializing_if = "Option::is_none"`), so it is optional here.
     sessionDisposed: ['type', 'sessionId'],
+    // Workspace registry state stream (baseline + increments).
+    workspaceUpdate: ['type', 'event'],
     error: ['type', 'message', 'sessionId'],
     // U2 cross-domain #1: the known-projects registry snapshot (rides the
     // ListThreads push; a full snapshot, never a delta).
@@ -188,12 +205,16 @@ export function parseHostEvent(v: unknown): Guard<HostEventShape> {
     terminalsUpdated: ['type', 'terminals'],
   };
   const keys = arms[v.type];
-  if (!exactKeys(v, keys)) {
+  const shapeOk = v.type === 'sessionDisposed'
+    ? keysWithin(v, keys, ['successor'])
+    : exactKeys(v, keys);
+  if (!shapeOk) {
     return { ok: false, reason: `host event ${v.type}: exact-keys check failed` };
   }
   if (v.type !== 'ready' && !typeofOr(v.sessionId, 'string') && v.type !== 'models'
     && v.type !== 'commands' && v.type !== 'threadsUpdated' && v.type !== 'error'
-    && v.type !== 'projects' && v.type !== 'terminalsUpdated') {
+    && v.type !== 'projects' && v.type !== 'terminalsUpdated'
+    && v.type !== 'workspaceUpdate') {
     return { ok: false, reason: `host event ${v.type}: sessionId must be a string` };
   }
   return { ok: true, value: v as HostEventShape };

@@ -53,6 +53,7 @@
     "sessionStatus",
     "sessionCreated",
     "sessionDisposed",
+    "workspaceUpdate",
     "error",
     "projects",
     "terminalsUpdated"
