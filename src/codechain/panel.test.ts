@@ -14,7 +14,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as vscode from 'vscode';
 import { CodeChainPanel } from './panel';
-import type { ChainNavigation } from './navigation';
+import type { ChainNavigation, ReferenceHit } from './navigation';
 import type { CodeChain, FromPanel, ToPanel } from './types';
 import fixtures from '../../test-fixtures/codechain-cases.json';
 
@@ -89,7 +89,7 @@ function makePanel() {
 	} as unknown as ConstructorParameters<typeof CodeChainPanel>[1];
 	const navigation = {
 		showNode: vi.fn(async () => true),
-		findReferences: vi.fn(async () => {}),
+		listReferences: vi.fn(async () => [] as ReferenceHit[]),
 		watchActiveEditor: vi.fn(),
 	} as unknown as ChainNavigation;
 	const tools = { handle: vi.fn() };
@@ -98,7 +98,7 @@ function makePanel() {
 		store,
 		navigation,
 		() => tools as never,
-		{ compose: vi.fn(), log: (m: string) => logs.push(m) },
+		{ log: (m: string) => logs.push(m) },
 	);
 	return { panel, logs, saved, navigation, store };
 }
@@ -189,5 +189,53 @@ describe('CodeChainPanel (webview view)', () => {
 		// v2 (live) does navigate.
 		v2._msg({ t: 'nodeClick', nodeId: chain.root.id, focus: false });
 		expect(navigation.showNode).toHaveBeenCalledTimes(1);
+	});
+
+	// ── references drawer (panel → host request, host → panel answer) ────────
+
+	it('a findRefs request answers with the node\'s references, live each time', async () => {
+		const { panel, navigation } = makePanel();
+		const hits: ReferenceHit[] = [
+			{ uri: 'file:///repo/src/a.ts', range: { startLine: 3, startCharacter: 2, endLine: 3, endCharacter: 9 }, preview: 'callIt(a)' },
+		];
+		vi.mocked(navigation.listReferences).mockResolvedValue(hits);
+		const view = fakeView();
+		panel.resolveWebviewView(view as never);
+		panel.show(chain);
+		view._posts.length = 0;
+
+		view._msg({ t: 'findRefs', nodeId: chain.root.id });
+		await vi.waitFor(() => expect(view._posts.map((p) => p.t)).toContain('references'));
+		const answer = view._posts.find((p) => p.t === 'references');
+		expect(answer?.t === 'references' && answer.nodeId).toBe(chain.root.id);
+		expect(answer?.t === 'references' && answer.hits).toEqual(hits);
+
+		// Re-opening the drawer re-queries (a cached count would go stale as
+		// the user edits); the host never memoizes the answer.
+		view._msg({ t: 'findRefs', nodeId: chain.root.id });
+		await vi.waitFor(() => expect(navigation.listReferences).toHaveBeenCalledTimes(2));
+	});
+
+	it('a slow references reply for a chain the view has left is dropped', async () => {
+		const { panel, navigation } = makePanel();
+		let release: ((hits: ReferenceHit[]) => void) | undefined;
+		vi.mocked(navigation.listReferences).mockImplementation(
+			() => new Promise<ReferenceHit[]>((resolve) => (release = resolve)),
+		);
+		const v1 = fakeView();
+		panel.resolveWebviewView(v1 as never);
+		panel.show(chain);
+		v1._msg({ t: 'findRefs', nodeId: chain.root.id });
+
+		// The view is replaced while the provider is still working; the
+		// answer must not land in the new view.
+		const v2 = fakeView();
+		panel.resolveWebviewView(v2 as never);
+		panel.show({ ...chain, chainId: 'cc-next' });
+		v2._posts.length = 0;
+		release?.([]);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(v2._posts.filter((p) => p.t === 'references')).toHaveLength(0);
 	});
 });

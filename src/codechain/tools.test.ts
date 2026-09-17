@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 import fixtures from '../../test-fixtures/codechain-cases.json';
 import { ChainStore, type ChainStoreSink } from './chainStore';
 import type { CodeChain, ChainNodeDraft } from './types';
-import type { LspClient, LspItem, LspLocation, LspSymbol, ResolveDeps, WorkspaceView } from './resolve';
+import type { LspClient, LspItem, LspLocation, LspReference, LspSymbol, ResolveDeps, WorkspaceView } from './resolve';
 import { CodeChainTools, clientToolSpecs, TOOL_NAMES, type InvokeCall, type ReplySinks, type ToolSinks } from './tools';
 
 const symbolsByUri = fixtures.resolve.symbols as Record<string, LspSymbol[]>;
@@ -27,6 +27,11 @@ const emptyLsp: LspClient = {
 	// fixtures are chosen so the document-symbol tree alone decides ok vs
 	// unresolved. The index fallback itself is covered in resolve.test.
 	async workspaceSymbols(): Promise<LspLocation[]> {
+		return [];
+	},
+	// The references drawer belongs to the panel, not the tools: the fake
+	// answers empty so it satisfies the seam.
+	async references(): Promise<LspReference[]> {
 		return [];
 	},
 	async prepareCallHierarchy(): Promise<LspItem[]> {
@@ -161,6 +166,15 @@ describe('client tool specs', () => {
 		expect(entrySchema.properties?.root?.$ref).toBe('#/$defs/entryNode');
 		expect(entrySchema.$defs?.entryNode?.properties?.children).toBeUndefined();
 		expect(entrySchema.$defs?.node).toBeUndefined();
+		// `edgeNote` means "why this step follows its parent" — the root has no
+		// parent edge, and it is noise on a face whose point is "one node, not
+		// a tree". Extend's children keep it (they really do follow a parent).
+		expect(entrySchema.$defs?.entryNode?.properties?.edgeNote).toBeUndefined();
+		const extendSchema = specs[2]?.inputSchema as {
+			$defs?: Record<string, { properties?: Record<string, unknown> }>;
+		};
+		expect(extendSchema.$defs?.node?.properties?.edgeNote).toBeDefined();
+		expect(extendSchema.$defs?.node?.properties?.children).toBeDefined();
 		expect(specs[1]?.description).toContain(`client_${TOOL_NAMES.entry}`);
 		expect(specs[2]?.description).toContain(`client_${TOOL_NAMES.entry}`);
 		// Add (index 3) is the default one-node-per-call path and must
@@ -213,6 +227,35 @@ describe('TutorEntry (chain seed)', () => {
 		const handled = await tools.handle(call(`client_${TOOL_NAMES.entry}`, { title: 't', question: 'q', root: okRoot }), r.sinks);
 		expect(handled).toBe(true);
 		expect(r.calls[0]?.isError).toBe(false);
+	});
+
+	// The seed call is the one moment that decides the root's kind. The schema
+	// cannot enforce it (the enum legitimately spans every kind, because the
+	// same property face is what Extend reuses for children), so the handler
+	// normalizes instead of trusting: a root IS the chain's entry by
+	// construction, and the kind drives both the panel's kind dot and whether
+	// resolution expects a symbol.
+	it('normalizes the root kind to `entry` whatever the model labels it', async () => {
+		const { tools, store, reply } = makeTools();
+		const r = reply();
+		await tools.handle(
+			call(TOOL_NAMES.entry, { title: 't', question: 'q', root: { ...okRoot, kind: 'call' } }),
+			r.sinks,
+		);
+		expect(r.calls[0]?.isError).toBe(false);
+		expect(store.get('cc-1')?.root.kind).toBe('entry');
+	});
+
+	it('normalizing the kind does not change resolution (an entry keeps its symbol)', async () => {
+		const { tools, store, reply } = makeTools();
+		const r = reply();
+		await tools.handle(call(TOOL_NAMES.entry, { title: 't', question: 'q', root: okRoot }), r.sinks);
+		const root = store.get('cc-1')?.root;
+		expect(root?.kind).toBe('entry');
+		// The note shortcut (kind='note' → no symbol needed) must NOT be
+		// reachable by relabeling: `entry` still resolves its symbol.
+		expect(root?.location.resolveStatus).toBe('ok');
+		expect(root?.location.symbolPath).toBeDefined();
 	});
 
 	// The structural fix (real-model root cause): qwen3.8-flash's per-call
@@ -992,6 +1035,9 @@ describe('TutorExpand reports provider failures honestly', () => {
 				return '';
 			},
 			async workspaceSymbols() {
+				return [];
+			},
+			async references() {
 				return [];
 			},
 			async prepareCallHierarchy(): Promise<LspItem[]> {

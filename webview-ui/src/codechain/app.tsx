@@ -20,7 +20,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import type { ChainKind, CodeChain, ResolvedNode } from '../../../src/codechain/types';
+import type { ChainKind, CodeChain, ReferenceHit, ResolvedNode } from '../../../src/codechain/types';
 import { tourOrder } from '../../../src/codechain/tour';
 import { cn } from '../sidebar/webview/lib/utils';
 import { t } from '../shared/i18n';
@@ -89,6 +89,13 @@ const ProvenanceBadge = ({ node }: { node: ResolvedNode }) => {
   return (
     <span className="text-muted-foreground shrink-0 rounded border px-1 text-[9px]">{label}</span>
   );
+};
+
+/** Just the file (plus line) of a reference row: the host owns path
+ * semantics, so the webview only ever prints what it was handed. */
+const refLocationLabel = (hit: ReferenceHit): string => {
+  const file = hit.uri.split(/[\\/]/).pop() ?? hit.uri;
+  return `${file}:${hit.range.startLine + 1}`;
 };
 
 const TreeRow = ({
@@ -195,19 +202,115 @@ const NarrativeBar = ({ narrative }: { narrative: string }) => {
   );
 };
 
+/** Host-sourced state of one node's references drawer. `loading` is the
+ * truth between opening the drawer and the host's `{t:'references'}` answer —
+ * the query runs host-side (the webview cannot reach an LSP), so "no
+ * references" is never guessed from a missing list. */
+interface RefsState {
+  hits: ReferenceHit[];
+}
+
+/** The node's "Find References" drawer, rendered UNDER the explanation: the
+ * reading order is "what this step does" → "where else it shows up". It
+ * replaces the old action-bar button and, unlike it, lists the references
+ * inline instead of handing the user off to another view. Collapsed by
+ * default; every open refetches, because references are live code facts that
+ * go stale the moment the user edits (`toggleRefs`). */
+const ReferencesDrawer = ({
+  refs,
+  open,
+  onToggle,
+  onOpenHit,
+}: {
+  refs: RefsState | null;
+  open: boolean;
+  onToggle: () => void;
+  onOpenHit: (hit: ReferenceHit) => void;
+}) => {
+  // `null` = the host has not answered for this node yet.
+  const summary =
+    refs === null
+      ? t('cc_refs_loading')
+      : refs.hits.length === 0
+        ? t('cc_refs_none')
+        : t('cc_refs_count', refs.hits.length);
+  return (
+    <div className="mt-3">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={onToggle}
+        className="text-muted-foreground hover:text-foreground flex w-full cursor-pointer items-center gap-1 text-left text-[11px]"
+      >
+        <span className={cn('inline-block shrink-0 transition-transform', open && 'rotate-90')}>▸</span>
+        <span className="shrink-0">{t('cc_find_refs')}</span>
+        <span className="shrink-0 opacity-70">· {summary}</span>
+      </button>
+      {open && refs !== null && refs.hits.length > 0 && (
+        <div className="mt-1">
+          {groupByFile(refs.hits).map(([uri, hits]) => (
+            <div className="mb-1" key={uri}>
+              <div className="text-muted-foreground truncate font-code text-[10px]">
+                {uri.split(/[\\/]/).pop() ?? uri}
+              </div>
+              {hits.map((hit) => (
+                <button
+                  type="button"
+                  key={`${hit.uri}:${hit.range.startLine}:${hit.range.startCharacter}`}
+                  onClick={() => onOpenHit(hit)}
+                  title={refLocationLabel(hit)}
+                  className="hover:bg-muted block w-full cursor-pointer truncate px-1 py-0.5 text-left font-code text-[11px]"
+                >
+                  <span className="text-muted-foreground mr-1.5 shrink-0 text-[10px]">
+                    {hit.range.startLine + 1}
+                  </span>
+                  {hit.preview || refLocationLabel(hit)}
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/** References in the provider's order, folded per file (the drawer's one
+ * level of grouping). */
+const groupByFile = (hits: ReferenceHit[]): [string, ReferenceHit[]][] => {
+  const groups = new Map<string, ReferenceHit[]>();
+  for (const hit of hits) {
+    const bucket = groups.get(hit.uri);
+    if (bucket) bucket.push(hit);
+    else groups.set(hit.uri, [hit]);
+  }
+  return [...groups.entries()];
+};
+
 /** The per-node detail body shared by the tree detail pane and the focus
  * card (§B.2 "复用 DetailPane 渲染"): edgeNote + summary (markdown) + the
- * ambiguity candidate picker + the unresolved hint. `showBeat` toggles the
- * beat line so the focus card can render it prominently at the top instead. */
+ * ambiguity candidate picker + the unresolved hint + the references drawer.
+ * `showBeat` toggles the beat line so the focus card can render it
+ * prominently at the top instead.
+ *
+ * There is deliberately no action bar: clicking a node IS the open-in-editor
+ * gesture (single click jumps with `preserveFocus`, double click focuses),
+ * and the references drawer replaces the old button. */
 const NodeDetailBody = ({
-  chain,
   node,
   showBeat,
+  refs,
+  refsOpen,
+  onToggleRefs,
+  onOpenRef,
   onPickCandidate,
 }: {
-  chain: CodeChain;
   node: ResolvedNode;
   showBeat: boolean;
+  refs: RefsState | null;
+  refsOpen: boolean;
+  onToggleRefs: () => void;
+  onOpenRef: (hit: ReferenceHit) => void;
   onPickCandidate: (id: string, index: number) => void;
 }) => (
   <>
@@ -222,6 +325,12 @@ const NodeDetailBody = ({
      * precedent of the transcript components). Progressive Extend makes
      * summaries markdown routinely, so the graph stays in the bundle. */}
     <MarkdownContent content={node.summary} className="text-sm leading-relaxed" />
+    {/* References ride directly under the explanation: the reading order the
+     * user asked for (what this step is → where else it shows up). Only a
+     * node with a resolved position has references to look up. */}
+    {node.location.resolveStatus !== 'unresolved' && node.location.uri !== '' && (
+      <ReferencesDrawer refs={refs} open={refsOpen} onOpenHit={onOpenRef} onToggle={onToggleRefs} />
+    )}
     {node.location.resolveStatus === 'ambiguous' && (node.location.candidates?.length ?? 0) > 0 && (
       <div className="mt-3">
         <div className="text-warning mb-1 text-xs font-medium">{t('cc_candidates')}</div>
@@ -243,91 +352,48 @@ const NodeDetailBody = ({
     )}
     {node.location.resolveStatus === 'unresolved' && (
       <p className="text-danger mt-2 text-xs">
-        {t('cc_unresolved')} — {chain.question ? t('cc_regen') : t('cc_refresh')}
+        {t('cc_unresolved')} — {t('cc_refresh')}
       </p>
     )}
-  </>
-);
-
-/** The node's action bar (open / find refs / copy path / regenerate) shared by
- * the detail pane and the focus card. */
-const NodeActionBar = ({
-  chain,
-  node,
-  onOpen,
-  onFindRefs,
-  onRegen,
-}: {
-  chain: CodeChain;
-  node: ResolvedNode;
-  onOpen: (id: string) => void;
-  onFindRefs: (id: string) => void;
-  onRegen: (question: string) => void;
-}) => (
-  <>
-    <span className="font-code min-w-0 flex-1 truncate text-xs text-muted-foreground">{locationLabel(node)}</span>
-    <button
-      className="hover:bg-accent shrink-0 cursor-pointer rounded border px-2 py-0.5 text-[11px]"
-      onClick={() => onOpen(node.id)}
-      type="button"
-    >
-      {t('cc_open_editor')}
-    </button>
-    {node.location.resolveStatus === 'ok' && node.location.uri !== '' && (
-      <>
-        <button
-          className="hover:bg-accent shrink-0 cursor-pointer rounded border px-2 py-0.5 text-[11px]"
-          onClick={() => onFindRefs(node.id)}
-          type="button"
-        >
-          {t('cc_find_refs')}
-        </button>
-        <button
-          className="hover:bg-accent shrink-0 cursor-pointer rounded border px-2 py-0.5 text-[11px]"
-          onClick={() => void navigator.clipboard?.writeText(node.location.symbolPath?.join('.') ?? node.label)}
-          type="button"
-        >
-          {t('cc_copy_path')}
-        </button>
-      </>
-    )}
-    <button
-      className="text-info hover:bg-accent ml-auto shrink-0 cursor-pointer rounded border px-2 py-0.5 text-[11px]"
-      onClick={() => onRegen(chain.question)}
-      title={t('cc_regen')}
-      type="button"
-    >
-      {t('cc_regenerate')}
-    </button>
   </>
 );
 
 const DetailPane = ({
   chain,
   node,
-  onOpen,
+  refs,
+  refsOpen,
+  onToggleRefs,
+  onOpenRef,
   onPickCandidate,
-  onFindRefs,
-  onRegen,
 }: {
   chain: CodeChain;
   node: ResolvedNode | null;
-  onOpen: (id: string) => void;
+  refs: RefsState | null;
+  refsOpen: boolean;
+  onToggleRefs: () => void;
+  onOpenRef: (hit: ReferenceHit) => void;
   onPickCandidate: (id: string, index: number) => void;
-  onFindRefs: (id: string) => void;
-  onRegen: (question: string) => void;
 }) => {
   if (!node) {
     return <div className="text-muted-foreground flex-1 p-4 text-sm">{t('cc_empty')}</div>;
   }
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="flex items-center gap-2 border-b border-border px-4 py-2">
-        <NodeActionBar chain={chain} node={node} onFindRefs={onFindRefs} onOpen={onOpen} onRegen={onRegen} />
+      <div className="text-muted-foreground border-b border-border px-4 py-1.5 font-code text-xs">
+        <span className="block truncate">{locationLabel(node)}</span>
       </div>
       <div className="px-4 py-3">
         {chain.narrative && <NarrativeBar narrative={chain.narrative} />}
-        <NodeDetailBody chain={chain} node={node} onPickCandidate={onPickCandidate} showBeat />
+        <NodeDetailBody
+          node={node}
+          onOpenRef={onOpenRef}
+          onPickCandidate={onPickCandidate}
+          onToggleRefs={onToggleRefs}
+          refs={refs}
+          refsOpen={refsOpen}
+          showBeat
+        />
       </div>
     </div>
   );
@@ -367,26 +433,28 @@ const FocusCard = ({
   chain,
   node,
   tour,
+  refs,
+  refsOpen,
+  onToggleRefs,
+  onOpenRef,
   onPrev,
   onNext,
   onOpenToc,
   onToggleMode,
-  onOpen,
   onPickCandidate,
-  onFindRefs,
-  onRegen,
 }: {
   chain: CodeChain;
   node: ResolvedNode | null;
   tour: { index: number; total: number };
+  refs: RefsState | null;
+  refsOpen: boolean;
+  onToggleRefs: () => void;
+  onOpenRef: (hit: ReferenceHit) => void;
   onPrev: () => void;
   onNext: () => void;
   onOpenToc: () => void;
   onToggleMode: () => void;
-  onOpen: (id: string) => void;
   onPickCandidate: (id: string, index: number) => void;
-  onFindRefs: (id: string) => void;
-  onRegen: (question: string) => void;
 }) => {
   const [narrativeOpen, setNarrativeOpen] = useState(false);
   if (!node) {
@@ -405,14 +473,22 @@ const FocusCard = ({
             {node.label}
           </span>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <NodeActionBar chain={chain} node={node} onFindRefs={onFindRefs} onOpen={onOpen} onRegen={onRegen} />
-        </div>
+        {/* The location is a label, not an action: clicking the tour stop IS
+            the open-in-editor gesture. */}
+        <div className="text-muted-foreground truncate font-code text-xs">{locationLabel(node)}</div>
         {/* The beat is the headline of the single-card reader. */}
         {node.beat && (
           <div className="text-info border-info/30 border-l-2 pl-2 text-sm font-medium">◆ {node.beat}</div>
         )}
-        <NodeDetailBody chain={chain} node={node} onPickCandidate={onPickCandidate} showBeat={false} />
+        <NodeDetailBody
+          node={node}
+          onOpenRef={onOpenRef}
+          onPickCandidate={onPickCandidate}
+          onToggleRefs={onToggleRefs}
+          refs={refs}
+          refsOpen={refsOpen}
+          showBeat={false}
+        />
         {chain.narrative && (
           <button
             type="button"
@@ -491,6 +567,12 @@ export const CodeChainApp = ({ bridge }: { bridge: PanelBridge }) => {
   const [tour, setTour] = useState({ index: -1, total: 0 });
   const [toast, setToast] = useState<string | null>(null);
   const [tocOpen, setTocOpen] = useState(false);
+  // References drawer: which node's drawer is open, and the host's answer for
+  // that node. Keyed by node id rather than "current node" so a late answer
+  // can never surface under a different stop, and so the drawer starts fresh
+  // (collapsed + loading) the moment the user moves on.
+  const [refsFor, setRefsFor] = useState<{ nodeId: string; open: boolean } | null>(null);
+  const [refs, setRefs] = useState<Record<string, RefsState>>({});
 
   // Layout mode: a manual toggle persists. A narrow dock (below the focus
   // breakpoint) always forces the focus card so a split screen never sees two
@@ -566,6 +648,13 @@ export const CodeChainApp = ({ bridge }: { bridge: PanelBridge }) => {
           case 'tourState':
             setTour({ index: message.index, total: message.total });
             return;
+          case 'references':
+            // The host always answers (empty on an absent provider), so an
+            // entry here means "queried". Keyed by node: the drawer renders
+            // whatever it has for the node it is showing, never a neighbour's
+            // answer.
+            setRefs((prev) => ({ ...prev, [message.nodeId]: { hits: message.hits } }));
+            return;
           case 'toast':
             setToast(message.message);
             return;
@@ -615,6 +704,42 @@ export const CodeChainApp = ({ bridge }: { bridge: PanelBridge }) => {
       return prev.size > 0 ? new Set() : new Set(allNodeIds(chain.root));
     });
   };
+
+  /** Open/close the references drawer for `nodeId`. Every OPEN refetches from
+   * the host (the query is an LSP round-trip the webview cannot make, and a
+   * cached list would silently describe code the user has since changed);
+   * closing keeps the last answer in state, so a re-open shows it instantly
+   * while the refetch is in flight. */
+  const toggleRefs = (nodeId: string): void => {
+    const wasOpen = refsFor?.nodeId === nodeId && refsFor.open;
+    setRefsFor({ nodeId, open: !wasOpen });
+    // Closing keeps the last answer (a re-open shows it instantly); opening
+    // clears it so the drawer can never present a previous query's rows as
+    // this one's answer while the host is still working.
+    if (wasOpen) return;
+    setRefs((prev) => {
+      if (!(nodeId in prev)) return prev;
+      const next = { ...prev };
+      delete next[nodeId];
+      return next;
+    });
+    post({ t: 'findRefs', nodeId });
+  };
+
+  /** A reference row opens that exact location. The host runs the jump (it
+   * owns uri parsing, column choice and decoration), and `focus:false` keeps
+   * the panel where it is — the same reveal discipline as a node click. */
+  const openRef = (hit: ReferenceHit): void => {
+    post({ t: 'openRef', uri: hit.uri, range: hit.range });
+  };
+
+  // `null` = not queried yet (the drawer reads that as "searching"): the
+  // query lives host-side, so "no references" is never inferred from a
+  // missing entry — the host always answers, even when it finds none.
+  const refsForNode = (nodeId: string | null): RefsState | null =>
+    (nodeId !== null ? refs[nodeId] : undefined) ?? null;
+  const refsOpenFor = (nodeId: string | null): boolean =>
+    nodeId !== null && refsFor?.nodeId === nodeId && refsFor.open;
 
   if (!chain) {
     return <div className="text-muted-foreground flex h-full items-center justify-center text-sm">{t('cc_empty')}</div>;
@@ -705,10 +830,11 @@ export const CodeChainApp = ({ bridge }: { bridge: PanelBridge }) => {
           <DetailPane
             chain={chain}
             node={selectedNode}
-            onFindRefs={(id) => post({ t: 'findRefs', nodeId: id })}
-            onOpen={(id) => select(id, true)}
+            onOpenRef={openRef}
             onPickCandidate={(id, index) => post({ t: 'pickCandidate', nodeId: id, index })}
-            onRegen={(question) => post({ t: 'regen', question })}
+            onToggleRefs={() => selectedNode && toggleRefs(selectedNode.id)}
+            refs={refsForNode(selectedNode?.id ?? null)}
+            refsOpen={refsOpenFor(selectedNode?.id ?? null)}
           />
         </div>
       ) : (
@@ -716,14 +842,15 @@ export const CodeChainApp = ({ bridge }: { bridge: PanelBridge }) => {
           chain={chain}
           node={focusNode}
           tour={tour}
-          onPrev={() => post({ t: 'tour', dir: 'prev' })}
           onNext={() => post({ t: 'tour', dir: 'next' })}
+          onOpenRef={openRef}
           onOpenToc={() => setTocOpen(true)}
-          onToggleMode={toggleMode}
-          onOpen={(id) => select(id, true)}
           onPickCandidate={(id, index) => post({ t: 'pickCandidate', nodeId: id, index })}
-          onFindRefs={(id) => post({ t: 'findRefs', nodeId: id })}
-          onRegen={(question) => post({ t: 'regen', question })}
+          onPrev={() => post({ t: 'tour', dir: 'prev' })}
+          onToggleMode={toggleMode}
+          onToggleRefs={() => focusNode && toggleRefs(focusNode.id)}
+          refs={refsForNode(focusNode?.id ?? null)}
+          refsOpen={refsOpenFor(focusNode?.id ?? null)}
         />
       )}
       {tocOpen && (

@@ -78,15 +78,9 @@ export function ensureCodeChain(context: ExtensionContext, host: AgentHost): voi
 		now: () => Date.now(),
 		log,
 	};
-	const navigation = new ChainNavigation(log);
+	const navigation = new ChainNavigation(log, deps.lsp);
 
-	const panel = new CodeChainPanel(context, store, navigation, () => tools, {
-		compose: (text, sessionId) => {
-			void vscode.commands.executeCommand('manox.chatView.focus');
-			postToSidebar({ t: 'verb', kind: 'compose', text, sessionId });
-		},
-		log,
-	});
+	const panel = new CodeChainPanel(context, store, navigation, () => tools, { log });
 	// The Code Tutor surface is a draggable webview VIEW (contributes.views.
 	// panel → manox.tutorView), not an editor tab: it registers alongside the
 	// service. `retainContextWhenHidden` lives on the registration's

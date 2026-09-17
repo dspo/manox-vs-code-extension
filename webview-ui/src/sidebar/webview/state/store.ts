@@ -464,7 +464,7 @@ export class Store {
 	}
 
 	/** Park the journal card for a freshly generated chain (§7). Keyed by
-	 * chainId so a replayed host note (or a regenerate that reuses the id)
+	 * chainId so a replayed host note (or a rebuilt chain that reuses the id)
 	 * replaces — never stacks — the card. Like the other transient cards it
 	 * lives beside the fold window, not inside it: the durable journal
 	 * stream has no code-chain event vocabulary (the chain is host state),
