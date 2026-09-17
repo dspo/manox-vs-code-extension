@@ -355,6 +355,127 @@ describe('code-chain panel — tree layout', () => {
     // ...but the narrative block is absent entirely.
     expect(text()).not.toContain('业务叙事');
   });
+
+  // ── the node action surface (post-UI-pass) ──────────────────────────────
+
+  it('the action bar is gone: no open/copy/regenerate buttons survive', () => {
+    renderPanel();
+    // Clicking the node is the open-in-editor gesture, so the button is gone.
+    expect(queryButton('在编辑器中打开')).toBeUndefined();
+    expect(queryButton('复制符号路径')).toBeUndefined();
+    // Regenerate is gone entirely — rebuilding a chain is a sidebar turn.
+    expect(queryButton('重新生成')).toBeUndefined();
+    expect(queryButton('重新生成这条链')).toBeUndefined();
+  });
+
+  it('the references drawer sits under the explanation, collapsed, and posts findRefs on open', () => {
+    const { bridge } = renderPanel();
+    // The tree's selected node is the root (`handler.create`, resolved).
+    expect(text()).toContain('Find References');
+    // Collapsed: it has asked the host for nothing yet.
+    expect(bridge.sent.some((m) => m.t === 'findRefs')).toBe(false);
+
+    click(queryButton('Find References'));
+    expect(bridge.sent).toContainEqual({ t: 'findRefs', nodeId: chain.root.id });
+    // No answer yet → the drawer says it is still searching.
+    expect(text()).toContain('查询中');
+
+    act(() => {
+      bridge.feed({
+        t: 'references',
+        nodeId: chain.root.id,
+        hits: [
+          {
+            uri: 'file:///repo/src/order/router.ts',
+            range: { startLine: 40, startCharacter: 4, endLine: 40, endCharacter: 16 },
+            preview: 'const order = await createOrder(request);',
+          },
+          {
+            uri: 'file:///repo/src/order/router.ts',
+            range: { startLine: 88, startCharacter: 2, endLine: 88, endCharacter: 14 },
+            preview: 'return createOrder(next);',
+          },
+          {
+            uri: 'file:///repo/test/order.test.ts',
+            range: { startLine: 7, startCharacter: 0, endLine: 7, endCharacter: 12 },
+            preview: "it('creates', () => createOrder({}));",
+          },
+        ],
+      });
+    });
+    // Count summary + the grouped rows with their code lines.
+    expect(text()).toContain('3 处引用');
+    expect(text()).toContain('const order = await createOrder(request);');
+    expect(text()).toContain('return createOrder(next);');
+    expect(text()).toContain("it('creates', () => createOrder({}));");
+    // Grouped per file: two file headers, not three.
+    expect(text().match(/router\.ts/g) ?? []).toHaveLength(1);
+    expect(text()).toContain('order.test.ts');
+    // Line numbers are 1-based (the wire range is 0-based).
+    expect(text()).toContain('41');
+    expect(text()).toContain('89');
+  });
+
+  it('clicking a reference row posts openRef with that row\'s uri + range', () => {
+    const { bridge } = renderPanel();
+    click(queryButton('Find References'));
+    const hit = {
+      uri: 'file:///repo/test/order.test.ts',
+      range: { startLine: 7, startCharacter: 0, endLine: 7, endCharacter: 12 },
+      preview: "it('creates', () => createOrder({}));",
+    };
+    act(() => {
+      bridge.feed({ t: 'references', nodeId: chain.root.id, hits: [hit] });
+    });
+    click(queryButton("it('creates'"));
+    expect(bridge.sent).toContainEqual({ t: 'openRef', uri: hit.uri, range: hit.range });
+  });
+
+  it('an empty answer reads as "no references", and re-opening refetches', () => {
+    const { bridge } = renderPanel();
+    click(queryButton('Find References'));
+    act(() => {
+      bridge.feed({ t: 'references', nodeId: chain.root.id, hits: [] });
+    });
+    expect(text()).toContain('未找到引用');
+    // References go stale as the user edits: the second open asks again.
+    click(queryButton('Find References')); // close
+    click(queryButton('Find References')); // open again
+    expect(bridge.sent.filter((m) => m.t === 'findRefs')).toHaveLength(2);
+  });
+
+  it('an answer for a node the user has moved on from never renders', () => {
+    const { bridge } = renderPanel();
+    click(queryButton('Find References'));
+    // Select another node before the host answers.
+    act(() => {
+      rowByLabel('validateStock')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    act(() => {
+      bridge.feed({
+        t: 'references',
+        nodeId: chain.root.id,
+        hits: [
+          {
+            uri: 'file:///repo/src/order/router.ts',
+            range: { startLine: 40, startCharacter: 4, endLine: 40, endCharacter: 16 },
+            preview: 'stale-row',
+          },
+        ],
+      });
+    });
+    expect(text()).not.toContain('stale-row');
+  });
+
+  it('the drawer is not offered for a node without a resolved location', () => {
+    renderPanel();
+    // The fixture's `phantomHelper` is the unresolved node.
+    act(() => {
+      rowByLabel('phantomHelper')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(text()).toContain('未解析');
+    expect(queryButton('Find References')).toBeUndefined();
+  });
 });
 
 describe('code-chain panel — focus layout (narrow container)', () => {

@@ -14,6 +14,7 @@ import {
 	type LspClient,
 	type LspItem,
 	type LspLocation,
+	type LspReference,
 	type LspSymbol,
 	type ResolveDeps,
 	type WorkspaceView,
@@ -54,6 +55,11 @@ class FakeLsp implements LspClient {
 	}
 	async workspaceSymbols(query: string): Promise<LspLocation[]> {
 		return workspaceSymbolsByQuery[query] ?? [];
+	}
+	/** References lookup: not exercised by the resolver tests (the panel's
+	 * drawer owns it); answers empty so the fake satisfies the seam. */
+	async references(): Promise<LspReference[]> {
+		return [];
 	}
 	async prepareCallHierarchy(uri: string): Promise<LspItem[]> {
 		const tree = this.symbols[uri] ?? [];
@@ -454,6 +460,9 @@ describe('call-hierarchy expansion (§4, no LLM)', () => {
 			async workspaceSymbols() {
 				return [];
 			},
+			async references() {
+				return [];
+			},
 			async prepareCallHierarchy() {
 				return [prepared];
 			},
@@ -499,6 +508,9 @@ describe('call-hierarchy expansion (§4, no LLM)', () => {
 			async workspaceSymbols() {
 				return [];
 			},
+			async references() {
+				return [];
+			},
 			async prepareCallHierarchy() {
 				return [{ name: 'OrderService', uri: anchorUri, range: rng(41), selectionRange: rng(41), handle }];
 			},
@@ -538,6 +550,9 @@ describe('call-hierarchy expansion (§4, no LLM)', () => {
 				return '';
 			},
 			async workspaceSymbols() {
+				return [];
+			},
+			async references() {
 				return [];
 			},
 			async prepareCallHierarchy(): Promise<LspItem[]> {

@@ -113,7 +113,7 @@ const GEN_CODE_CHAIN_DESCRIPTION =
 	TOOL_NAMES.extend +
 	" block stays a large-budget shortcut for a whole sub-area that must land together. Curation rules, in priority order: (1) BUSINESS LOOP FIRST: include a node only when the step changes or carries business state data — acceptance -> core validation -> state change -> event/settlement -> outlet. Each `summary` (<= " +
 	MAX_SUMMARY_CHARS +
-	" chars) says what happens BUSINESS-wise in the user's language, never a restatement of the code. (2) DO NOT DESCEND INTO BOILERPLATE: middleware chains, request-parameter format validation, idempotency checks, audit logging, error wrapping, and DTO conversion must NOT become nodes; if such a step has a genuine business exception, fold it into the parent's summary or `edgeNote` in one sentence. (3) PRUNE BRANCHES: expand only branches whose alternatives differ in business meaning; summarize all error/rollback paths in at most ONE kind='note' node. (4) ONE ENTRY NODE HERE, NO TREE: `root` is a SINGLE entry node with NO `children` — do not pack the rest of the flow into it (that is exactly the multi-node payload that truncates; the host rejects a `root` carrying `children`). Grow the chain one node at a time with client_" +
+	" chars) says what happens BUSINESS-wise in the user's language, never a restatement of the code. (2) DO NOT DESCEND INTO BOILERPLATE: middleware chains, request-parameter format validation, idempotency checks, audit logging, error wrapping, and DTO conversion must NOT become nodes; if such a step has a genuine business exception, fold it into the parent's summary or `edgeNote` in one sentence. (3) PRUNE BRANCHES: expand only branches whose alternatives differ in business meaning; summarize all error/rollback paths in at most ONE kind='note' node. (4) ONE ENTRY NODE HERE, NO TREE: `root` is a SINGLE entry node with NO `children` and no `edgeNote` (it has no parent edge) — do not pack the rest of the flow into it (that is exactly the multi-node payload that truncates; the host rejects a `root` carrying `children`). The host records this node as the chain's entry regardless of the `kind` you send, so point `file`/`symbol` at where the flow starts (the route handler / the business trigger). Grow the chain one node at a time with client_" +
 	TOOL_NAMES.add +
 	", or attach a whole sub-area as one <= " +
 	MAX_EXTEND_NODES +
@@ -217,6 +217,12 @@ const NODE_PROPERTIES = {
 	beat: { type: 'string', maxLength: MAX_BEAT_CHARS, description: 'This node\'s one story-beat inside the narrative (<= 60 chars).' },
 };
 
+/** The seed node's properties: `NODE_PROPERTIES` minus `edgeNote`. The root
+ * has no parent edge, so the field could only ever describe nothing — and
+ * `edgeNote` is noise on a face whose whole point is "this is one node, not a
+ * tree". Extend's children keep it: they really do follow a parent. */
+const { edgeNote: _entryHasNoParentEdge, ...ENTRY_NODE_PROPERTIES } = NODE_PROPERTIES;
+
 /** `TOOL_NAMES.entry` input: the chain `title` + `question` and a SINGLE
  * entry node as `root`. `root` points at `$defs.entryNode` — the shared node
  * fields MINUS `children` — so the schema itself cannot invite a multi-node
@@ -246,14 +252,14 @@ const entrySchema = {
 			// client_TutorAdd call" isError instead of the model silently
 			// dropping a whole subtree it tried to send.
 			properties: {
-				...NODE_PROPERTIES,
+				...ENTRY_NODE_PROPERTIES,
 			},
 		},
 	},
 };
 
 /** `TOOL_NAMES.extend` input: one parent + a ≤ MAX_EXTEND_NODES chunk of
- * new children under it (same recursive node shape as the seed tree). */
+ * new children under it (the shared recursive node shape). */
 const extendSchema = {
 	$schema: 'https://json-schema.org/draft/2020-12/schema',
 	type: 'object',
@@ -576,7 +582,14 @@ export class CodeChainTools {
 				`${TOOL_NAMES.entry} requires \`title\` and a single \`root\` entry node with {id,label,kind,file,summary} and NO \`children\` (add the rest of the chain one node per client_${TOOL_NAMES.add} call; commit the narrative separately with client_${TOOL_NAMES.narrate})`,
 			);
 		}
-		const { draft, warnings } = validateDraft(rootParse.draft);
+		// The seed call is the ONE moment that decides the root's kind, and
+		// the schema cannot enforce it (the enum legitimately spans all kinds,
+		// because the same properties face is what Extend reuses). Normalize
+		// rather than trust: a root is the chain's entry by construction, and a
+		// model that labels it 'call' would only paint the wrong dot on it.
+		// `kind` also drives resolution — an 'entry' with no symbol resolves
+		// like a note — so this must land BEFORE `validateDraft`/`resolveChain`.
+		const { draft, warnings } = validateDraft({ ...rootParse.draft, kind: 'entry' });
 		const key = `${call.sessionId}:${draft.id}`;
 		const { chain, failures } = await resolveChain(this.deps, {
 			sessionId: call.sessionId,

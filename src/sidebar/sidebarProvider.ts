@@ -41,16 +41,12 @@ export type ToHost =
 /** Host → webview messages: raw protocol frames plus host state pushes.
  * The `code_chain` verb is the out-of-band journal-card push (§7: a tool
  * invocation by THIS host has no webview-visible side effect otherwise);
- * `compose` backfills the composer with a `/tutor …` question (§10
- * read-only reopen path); it carries the originating sessionId so the
- * composer can verify it belongs to the thread on screen (review #16);
  * `pong` echoes a watchdog `ping`'s seq — the heartbeat reply proving the
  * host→webview postMessage channel still delivers. */
 export type ToWebview =
 	| { t: 'frame'; frame: FromServer }
 	| { t: 'verb'; kind: 'new_session' | 'open_turn_navigator' }
 	| { t: 'verb'; kind: 'code_chain'; sessionId: string; chainId: string; title: string; nodeCount: number }
-	| { t: 'verb'; kind: 'compose'; text: string; sessionId: string }
 	| { t: 'config'; approvalMode: string }
 	| { t: 'boot'; cwd: string; approvalMode: string }
 	| { t: 'pong'; seq: number }
@@ -58,22 +54,8 @@ export type ToWebview =
 
 let activeProvider: ManoxSidebarProvider | null = null;
 
-/** A `compose` prefill posted before the sidebar view exists would be
- * dropped outright (the panel's Regenerate right after a window reload is
- * exactly that race). Stash the most recent one and replay it the moment a
- * view resolves — the same "host push can outrun the bundle" concern
- * `panel.ts` answers with its `{t:'ready'}` handshake, handled here at the
- * resolve boundary instead (review round-2, suggestion 7). Only `compose`
- * (a one-shot, idempotent prefill) is stashed; frames/verbs are live and
- * must not replay. */
-let pendingCompose: Extract<ToWebview, { kind: 'compose' }> | null = null;
-
 /** Post a message to the live sidebar webview (no-op when closed). */
 export function postToSidebar(message: ToWebview): void {
-	if (message.t === 'verb' && message.kind === 'compose' && !activeProvider) {
-		pendingCompose = message;
-		return;
-	}
 	activeProvider?.post(message);
 }
 
@@ -138,13 +120,6 @@ class ManoxSidebarProvider implements vscode.WebviewViewProvider {
 				cwd: resolveWorkspaceCwd(),
 				approvalMode: configuredApprovalMode(),
 			});
-			// A panel Regenerate that fired before this view resolved was
-			// stashed rather than dropped; replay it now the webview exists
-			// (review round-2, suggestion 7).
-			if (pendingCompose) {
-				this.post(pendingCompose);
-				pendingCompose = null;
-			}
 		} catch (e) {
 			this.post({ t: 'fatal', message: errorText(e) });
 		}

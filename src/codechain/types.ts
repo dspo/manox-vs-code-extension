@@ -130,8 +130,10 @@ export interface CodeChain {
 
 // ── structural caps (§3: enforced by the host, relayed back to the LLM) ────
 
-/** Whole-tree depth budget. A seed draft stays shallow (spine ≤ 3 levels)
- * and goes deeper via `TOOL_NAMES.extend` chunks; 4 is the hard ceiling. */
+/** Whole-tree depth budget: 4 levels is the hard ceiling. No seed carries
+ * depth any more — `TOOL_NAMES.entry` seeds ONE node, and every level below
+ * it arrives through `TOOL_NAMES.add` (one node) or `TOOL_NAMES.extend` (a
+ * ≤ MAX_EXTEND_NODES chunk), each validated against this cap. */
 export const MAX_CHAIN_DEPTH = 4;
 /** Whole-tree node budget. Smaller than the original 80 on purpose: large
  * trees are built progressively (one ≤ MAX_EXTEND_NODES chunk per call),
@@ -154,8 +156,10 @@ export const MAX_EXTEND_NODES = 8;
 
 /** Host → panel. `chain` is the whole-tree message (open / refresh /
  * re-render / reveal-after-reload); `sync` marks the node the active editor
- * landed on; `tourState` mirrors the tour cursor; `toast` surfaces a
- * one-line status.
+ * landed on; `tourState` mirrors the tour cursor; `references` answers a
+ * `findRefs` request with the LSP reference rows for that node (the drawer
+ * is live data, not stored chain state — the host owns the query, the
+ * webview only renders it); `toast` surfaces a one-line status.
  *
  * DEVIATION from §6.4: the incremental `{t:'patch',ops}` channel was cut in
  * v1 — every update re-sends the whole tree (≤48 nodes). The panel keeps
@@ -165,16 +169,34 @@ export type ToPanel =
 	| { t: 'chain'; chain: CodeChain }
 	| { t: 'sync'; nodeId: string | null }
 	| { t: 'tourState'; index: number; total: number }
+	| { t: 'references'; nodeId: string; hits: ReferenceHit[] }
 	| { t: 'toast'; message: string };
+
+/** One reference row: the location plus the source line it sits on (read by
+ * the host, because the webview has no filesystem and must not). `preview`
+ * is a trimmed, length-capped single line — it is display text, never a
+ * path the panel navigates by. */
+export interface ReferenceHit {
+	uri: string;
+	range: ChainRange;
+	preview: string;
+}
 
 /** Panel → host. `nodeClick` jumps the editor (focus=false keeps it in the
  * panel); `tour` steps the DFS cursor; `pickCandidate` resolves an
- * ambiguity; `findRefs` opens a references lookup; `regen` backfills the
- * chain's question into the sidebar composer (§10 read-only reopen path);
- * `ready` is emitted once at bundle mount — the host answers by re-sending
- * the current snapshot, because `retainContextWhenHidden:false` lets VS
- * Code discard the webview when the tab hides and a re-shown tab reloads to
- * an empty React tree (review #1); `log` relays console diagnostics. */
+ * ambiguity; `findRefs` asks for a node's references — a REQUEST, not an
+ * action: the host runs the LSP query and answers with `{t:'references'}`,
+ * because the webview cannot reach an LSP itself and a cached answer would
+ * go stale (the drawer refetches each time it opens); `openRef` jumps to a
+ * reference row's own location (uri + range, not a chain node — the row
+ * names code OUTSIDE the chain); `ready` is emitted once at bundle mount —
+ * the host answers by re-sending the current snapshot, because
+ * `retainContextWhenHidden:false` lets VS Code discard the webview when the
+ * tab hides and a re-shown tab reloads to an empty React tree (review #1);
+ * `log` relays console diagnostics.
+ *
+ * There is no "regenerate" ask: the panel is a read-only tour of a stored
+ * chain, and a rebuild is a normal `/tutor …` turn in the sidebar. */
 export type FromPanel =
 	| { t: 'ready' }
 	| { t: 'nodeClick'; nodeId: string; focus: boolean }
@@ -182,5 +204,5 @@ export type FromPanel =
 	| { t: 'refresh' }
 	| { t: 'pickCandidate'; nodeId: string; index: number }
 	| { t: 'findRefs'; nodeId: string }
-	| { t: 'regen'; question: string }
+	| { t: 'openRef'; uri: string; range: ChainRange }
 	| { t: 'log'; level: 'info' | 'warn' | 'error'; message: string };

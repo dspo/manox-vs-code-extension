@@ -73,6 +73,16 @@ export interface LspLocation {
 	name?: string;
 }
 
+/** One row of the read-only references lookup (the panel's "Find References"
+ * drawer): plain data — the core never touches `vscode.Location`, so the
+ * query face stays injectable for tests (§19). */
+export interface LspReference {
+	uri: string;
+	range: ChainRange;
+	/** Name the provider attached when it volunteered one. */
+	name?: string;
+}
+
 /** Per-call budget for a provider round-trip: a wedged language server must
  * surface as "no symbols here" (→ unresolved / workspace fallback), never
  * freeze the tool until the server's 300s CALL_TIMEOUT (review #10). */
@@ -103,6 +113,10 @@ export interface LspClient {
 	readText(uri: string): Promise<string>;
 	/** §5 zero-hit fallback: the workspace-wide symbol index. */
 	workspaceSymbols(query: string): Promise<LspLocation[]>;
+	/** References lookup (the panel's FIND-REFERENCES drawer): every LSP
+	 * reference at a position, `[]` when the provider is absent / stalled —
+	 * a read-only probe must never turn a missing provider into an error. */
+	references(uri: string, position: { line: number; character: number }): Promise<LspReference[]>;
 	/** Each returned item carries a `handle` the adapter needs to call the
 	 * `provide*` commands below — relay it back unchanged. */
 	prepareCallHierarchy(uri: string, position: { line: number; character: number }): Promise<LspItem[]>;
@@ -484,9 +498,10 @@ export interface DraftValidation {
  * caller persists exactly what this face validated (the same one-stop
  * contract as `summary` — `resolveChain` itself never re-clamps). As of the
  * narrate split, the only tree-bearing caller still passing one is
- * `TOOL_NAMES.extend`'s optional replacement path — the entry tool seeds
- * the spine only (`TOOL_NAMES.narrate` commits the story on its own call) —
- * so the parameter is optional by design and a caller may omit it.
+ * `TOOL_NAMES.extend`'s optional replacement path — `TOOL_NAMES.entry` seeds
+ * the spine with a SINGLE node and carries no story (`TOOL_NAMES.narrate`
+ * commits it on its own call) — so the parameter is optional by design and a
+ * caller may omit it.
  *
  * There is no `errors` channel here by design: a cap violation is a
  * truncation (a `warning`), and a malformed node is a `parseDraft` drop —
