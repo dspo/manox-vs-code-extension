@@ -419,10 +419,11 @@ export class ManoxClient {
 		});
 	}
 
-	/** Answer an elicitation row (chat input request). */
-	answerInput(chatUri: URI, requestId: string, answer: unknown): void {
-		this.dispatch(chatUri, { type: 'chat/inputAnswerChanged', requestId, answer });
-		this.dispatch(chatUri, { type: 'chat/inputCompleted', requestId });
+	/** Decline an elicitation (chat input request) — the participant's
+	 * fail-closed answer; the interactive path answers through the sidebar
+	 * with `inputCompleted` + keyed answers. */
+	declineInput(chatUri: URI, requestId: string): void {
+		this.dispatch(chatUri, { type: 'chat/inputCompleted', requestId, response: 'decline' });
 	}
 
 	/** Contribute/refresh this client's session tools (AHP-native

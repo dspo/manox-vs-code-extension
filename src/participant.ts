@@ -137,7 +137,7 @@ function projectChatState(state: ChatState, stream: vscode.ChatResponseStream, f
  * confirmations and decline input requests (questions / plan reviews) with a
  * pointer to the sidebar, each exactly once. */
 function denyInteractiveRequests(
-	manox: { confirmToolCall(chatUri: string, toolCallId: string, approved: boolean): void; answerInput(chatUri: string, requestId: string, answer: unknown): void },
+	manox: { confirmToolCall(chatUri: string, toolCallId: string, approved: boolean): void; declineInput(chatUri: string, requestId: string): void },
 	chatUri: string,
 	state: ChatState,
 	stream: vscode.ChatResponseStream,
@@ -145,9 +145,9 @@ function denyInteractiveRequests(
 	for (const part of state.activeTurn?.responseParts ?? []) {
 		const record = part as {
 			kind?: string;
-			toolCall?: { id?: string; state?: string; name?: string };
+			toolCall?: { id?: string; status?: string; name?: string };
 		};
-		if (record.kind === 'toolCall' && record.toolCall?.id && record.toolCall.state === 'pendingConfirmation') {
+		if (record.kind === 'toolCall' && record.toolCall?.id && record.toolCall.status === 'pending-confirmation') {
 			manox.confirmToolCall(chatUri, record.toolCall.id, false);
 			stream.markdown(
 				`\n\n_⚠️ \`${record.toolCall.name ?? 'tool'}\` requires approval — denied in chat. Open the **manox sidebar** and re-run there to approve interactively._`,
@@ -156,14 +156,13 @@ function denyInteractiveRequests(
 	}
 	// Elicitations (questions, plan reviews) ride the chat's input-request
 	// surface; decline with the pointer. The request id arrives from the
-	// inputRequest response part.
+	// inputRequest response part (field `request`; `response` carries the
+	// settlement once answered).
 	for (const part of state.activeTurn?.responseParts ?? []) {
-		const record = part as { kind?: string; inputRequest?: { requestId?: string; state?: string; title?: string } };
-		const request = record?.inputRequest;
-		if (record.kind === 'inputRequest' && request?.requestId && request.state === 'pending') {
-			manox.answerInput(chatUri, request.requestId, {
-				response: 'decline',
-			});
+		const record = part as { kind?: string; request?: { id?: string }; response?: string };
+		const request = record?.request;
+		if (record.kind === 'inputRequest' && request?.id && record.response === undefined) {
+			manox.declineInput(chatUri, request.id);
 			stream.markdown('\n\n_⚠️ This needs interactive input — open the **manox sidebar**._');
 		}
 	}
