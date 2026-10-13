@@ -1,7 +1,7 @@
-// Workspace scoping for the threads list (§ the sidebar's one rewritten
-// frame). The rule is ported from the manox monorepo's embedded extension
-// (`crates/manox-actor/src/actor.rs`, commit b1b099f2), so these tests pin the
-// same three behaviors that commit's message called out:
+// Workspace scoping for the session catalogue (§ the sidebar's one rewritten
+// part of the relay). The rule is ported from the manox monorepo's embedded
+// extension (`crates/manox-actor/src/actor.rs`, commit b1b099f2), so these
+// tests pin the same three behaviors that commit's message called out:
 //   * a session started in a LINKED WORKTREE is visible from the main
 //     checkout, and vice versa (the bug the original fixed);
 //   * a directory outside the workspace's repository is hidden;
@@ -10,25 +10,18 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import type { FromServer, ThreadListItem } from '../protocol/types';
-import { threadsOf, withThreads, WorkspaceThreadFilter, gitCommonDir } from './workspaceFilter';
+import type { ScopeRow } from './workspaceFilter';
+import { WorkspaceThreadFilter, fileUriToPath, gitCommonDir, projectOfSummary, threadsOwnedBy } from './workspaceFilter';
 
-const row = (id: string, project?: string): ThreadListItem => ({
-	id,
-	title: id,
-	updated_at: 0,
-	running: false,
-	unread: false,
-	errored: false,
-	pending_auth: false,
-	pending_plan: false,
-	background_work: false,
-	model_id: 'm',
-	pinned: false,
-	archived: false,
-	parent_id: null,
-	depth: 0,
+const row = (resource: string, project?: string): ScopeRow => ({
+	resource,
 	...(project !== undefined ? { project } : {}),
+});
+
+/** The AHP summary shape (`workingDirectories` are `file://` URIs). */
+const summary = (resource: string, dirs?: string[]): { resource: string; workingDirectories?: string[] } => ({
+	resource,
+	...(dirs ? { workingDirectories: dirs } : {}),
 });
 
 /** A fake git: every listed directory maps to a repository identity. */
@@ -44,10 +37,10 @@ describe('WorkspaceThreadFilter', () => {
 			'/other': '/repos/other/.git',
 		});
 		const kept = await filter.ownedBy(
-			[row('a', '/w'), row('b', '/other')],
+			[row('ahp-session:/a', '/w'), row('ahp-session:/b', '/other')],
 			'/w',
 		);
-		expect(kept.map((r) => r.id)).toEqual(['a']);
+		expect(kept.map((r) => r.resource)).toEqual(['ahp-session:/a']);
 	});
 
 	it('admits a LINKED WORKTREE of the same repository (the original bug)', async () => {
@@ -61,13 +54,13 @@ describe('WorkspaceThreadFilter', () => {
 			[row('main', '/w'), row('wt', '/w-feature'), row('out', '/elsewhere')],
 			'/w',
 		);
-		expect(kept.map((r) => r.id)).toEqual(['main', 'wt']);
+		expect(kept.map((r) => r.resource)).toEqual(['main', 'wt']);
 	});
 
 	it('matches in the other direction too (worktree workspace, main-checkout thread)', async () => {
 		const { filter } = gitOf({ '/w-feature': '/repos/w/.git', '/w': '/repos/w/.git' });
 		const kept = await filter.ownedBy([row('main', '/w')], '/w-feature');
-		expect(kept.map((r) => r.id)).toEqual(['main']);
+		expect(kept.map((r) => r.resource)).toEqual(['main']);
 	});
 
 	it('falls back to exact-path matching when the workspace is outside git', async () => {
@@ -76,13 +69,13 @@ describe('WorkspaceThreadFilter', () => {
 			[row('exact', '/plain'), row('nested', '/plain/nested'), row('other', '/somewhere')],
 			'/plain',
 		);
-		expect(kept.map((r) => r.id)).toEqual(['exact']);
+		expect(kept.map((r) => r.resource)).toEqual(['exact']);
 	});
 
 	it('admits a row with no `project` rather than hiding the user\'s own thread', async () => {
 		const { filter } = gitOf({ '/w': '/repos/w/.git' });
 		const kept = await filter.ownedBy([row('ungrouped'), row('here', '/w')], '/w');
-		expect(kept.map((r) => r.id)).toEqual(['ungrouped', 'here']);
+		expect(kept.map((r) => r.resource)).toEqual(['ungrouped', 'here']);
 	});
 
 	it('preserves the server\'s row order', async () => {
@@ -91,7 +84,7 @@ describe('WorkspaceThreadFilter', () => {
 			[row('c', '/wt'), row('a', '/w'), row('b', '/wt')],
 			'/w',
 		);
-		expect(kept.map((r) => r.id)).toEqual(['c', 'a', 'b']);
+		expect(kept.map((r) => r.resource)).toEqual(['c', 'a', 'b']);
 	});
 
 	it('memoizes a CONFIRMED identity but never caches a miss', async () => {
@@ -113,7 +106,7 @@ describe('WorkspaceThreadFilter', () => {
 		repos['/fresh'] = '/repos/w/.git'; // …so a later `git init` takes effect
 		const kept = await filter.ownedBy([row('y', '/fresh')], '/w');
 		expect(resolve.mock.calls.filter((c) => c[0] === '/fresh').length).toBeGreaterThan(before);
-		expect(kept.map((r) => r.id)).toEqual(['y']);
+		expect(kept.map((r) => r.resource)).toEqual(['y']);
 	});
 
 	it('shares one lookup for many rows in the same directory', async () => {
@@ -132,7 +125,7 @@ describe('WorkspaceThreadFilter', () => {
 		const logs: string[] = [];
 		const filter = new WorkspaceThreadFilter(resolve, (m) => logs.push(m));
 		const kept = await filter.ownedBy([row('bad', '/broken'), row('ok', '/w')], '/w');
-		expect(kept.map((r) => r.id)).toEqual(['ok']);
+		expect(kept.map((r) => r.resource)).toEqual(['ok']);
 		expect(logs.some((m) => m.includes('/broken'))).toBe(true);
 	});
 
@@ -144,47 +137,33 @@ describe('WorkspaceThreadFilter', () => {
 	});
 });
 
+describe('summary scoping', () => {
+	it('derives the project from the first file:// working directory', () => {
+		expect(projectOfSummary({ workingDirectories: ['file:///w', 'file:///elsewhere'] })).toBe('/w');
+		expect(projectOfSummary({})).toBeUndefined();
+	});
+
+	it('decodes file:// URIs to paths', () => {
+		expect(fileUriToPath('file:///a/b/c')).toBe('/a/b/c');
+		expect(fileUriToPath('/plain/path')).toBeUndefined();
+	});
+
+	it('threadsOwnedBy scopes AHP summaries to the workspace repository', async () => {
+		const repos: Record<string, string | undefined> = { '/w': '/repos/w/.git', '/other': '/repos/other/.git' };
+		const resolve = vi.fn(async (dir: string) => repos[dir] ?? null);
+		const filter = new WorkspaceThreadFilter(resolve);
+		const kept = await threadsOwnedBy(
+			[summary('ahp-session:/a', ['file:///w']), summary('ahp-session:/b', ['file:///other'])],
+			'/w',
+			filter,
+		);
+		expect(kept.map((r) => r.resource)).toEqual(['ahp-session:/a']);
+	});
+});
+
 describe('gitCommonDir', () => {
 	it('answers null for a directory that is not a repository', async () => {
 		// A path that cannot be a repo (and whose git invocation fails).
 		expect(await gitCommonDir('/nonexistent/definitely-not-a-repo-xyz')).toBeNull();
-	});
-});
-
-// ── the relay's frame surgery (both registry shapes) ──────────────────────
-// The registry arrives in TWO shapes during the dual-protocol window and both
-// fold into the same store state, so a filter that scoped only one of them
-// would leave the other showing every thread on the machine.
-
-describe('threads frame surgery', () => {
-	const kept = [row('kept', '/w')];
-
-	it('reads and rewrites the legacy `notification` shape', () => {
-		const frame = {
-			kind: 'notification',
-			note: { method: 'threadsUpdated', threads: [row('a', '/w')] },
-		} as unknown as FromServer;
-		expect(threadsOf(frame)?.map((r) => r.id)).toEqual(['a']);
-		const next = withThreads(frame, kept) as { note: { threads: unknown[] } };
-		expect(next.note.threads).toEqual(kept);
-	});
-
-	it('reads and rewrites the `host` frame shape', () => {
-		const frame = {
-			kind: 'host',
-			host: { type: 'threadsUpdated', threads: [row('a', '/w')] },
-		} as unknown as FromServer;
-		expect(threadsOf(frame)?.map((r) => r.id)).toEqual(['a']);
-		const next = withThreads(frame, kept) as { host: { threads: unknown[] } };
-		expect(next.host.threads).toEqual(kept);
-	});
-
-	it('ignores frames that carry no thread rows (they pass through untouched)', () => {
-		const others: FromServer[] = [
-			{ kind: 'host', host: { type: 'ready', epoch: 1 } },
-			{ kind: 'notification', note: { method: 'sessionCreated', sessionId: 's' } },
-			{ kind: 'response', id: '1', outcome: { Ok: {} } },
-		] as unknown as FromServer[];
-		for (const frame of others) expect(threadsOf(frame)).toBeNull();
 	});
 });

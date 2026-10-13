@@ -1,12 +1,12 @@
-// The `registerSessionTools` lifecycle controller over a fake host (§9.2
+// The client-tool contribution lifecycle controller over a fake host (§9.2
 // replay rules, review #4/#19): full-replace-per-register makes it idempotent,
-// a `sessionDisposed` frees the slot so a cold re-open under the SAME id
+// a `sessionRemoved` frees the slot so a cold re-open under the SAME id
 // re-sends the tool set, and the no-workspace case skips with a log. This is
-// the vscode-free face `ensureCodeChain` wires to the real connection.
+// the vscode-free face `ensureCodeChain` wires to the real client.
 
 import { describe, expect, it } from 'vitest';
 
-import type { ClientToolSpec } from '../protocol/types';
+import type { ToolDefinition } from '@microsoft/agent-host-protocol';
 import { SessionToolRegistrar, type RegistrarHost } from './sessionRegistrar';
 import { TOOL_NAMES } from './tools';
 
@@ -14,21 +14,24 @@ import { TOOL_NAMES } from './tools';
 // resolved send need a macrotask boundary before the in-flight slot frees).
 const flush = async (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
+const spec = (name: string): ToolDefinition => ({
+	name,
+	description: 'd',
+	inputSchema: { type: 'object' },
+});
+
 function fakeHost(opts: { hasWorkspace?: boolean; fail?: boolean } = {}) {
-	const sent: { sessionId: string; tools: ClientToolSpec[] }[] = [];
+	const sent: { sessionUri: string; tools: ToolDefinition[] }[] = [];
 	const logs: string[] = [];
 	const host: RegistrarHost = {
-		send: (sessionId, tools) => {
-			sent.push({ sessionId, tools });
+		send: (sessionUri, tools) => {
+			sent.push({ sessionUri, tools });
 			if (opts.fail) return Promise.reject(new Error('boom'));
-			return Promise.resolve({ registered: tools.length });
+			return Promise.resolve(null);
 		},
 		hasWorkspace: () => opts.hasWorkspace ?? true,
 		log: (m) => logs.push(m),
-		tools: () => [
-			{ name: TOOL_NAMES.entry, description: 'd', input_schema: {} },
-			{ name: TOOL_NAMES.expand, description: 'd', input_schema: {} },
-		],
+		tools: () => [spec(TOOL_NAMES.entry), spec(TOOL_NAMES.expand)],
 	};
 	return { host, sent, logs };
 }
@@ -36,62 +39,59 @@ function fakeHost(opts: { hasWorkspace?: boolean; fail?: boolean } = {}) {
 describe('SessionToolRegistrar', () => {
 	it('sends the full registered tool set on the first edge', () => {
 		const { host, sent } = fakeHost();
-		new SessionToolRegistrar(host).registerSession('s1');
+		new SessionToolRegistrar(host).registerSession('ahp-session:/s1');
 		expect(sent).toHaveLength(1);
-		expect(sent[0]?.sessionId).toBe('s1');
-		expect(sent[0]?.tools).toEqual([
-			{ name: TOOL_NAMES.entry, description: 'd', input_schema: {} },
-			{ name: TOOL_NAMES.expand, description: 'd', input_schema: {} },
-		]);
+		expect(sent[0]?.sessionUri).toBe('ahp-session:/s1');
+		expect(sent[0]?.tools).toEqual([spec(TOOL_NAMES.entry), spec(TOOL_NAMES.expand)]);
 	});
 
 	it('dedups only the in-flight burst, not the process lifetime', async () => {
 		const { host, sent } = fakeHost();
 		let release!: () => void;
-		host.send = (sessionId, tools) =>
+		host.send = (sessionUri, tools) =>
 			new Promise<void>((resolve) => {
-				sent.push({ sessionId, tools });
+				sent.push({ sessionUri, tools });
 				release = () => resolve();
 			});
 		const reg = new SessionToolRegistrar(host);
-		reg.registerSession('s1');
-		reg.registerSession('s1'); // still in flight → suppressed
+		reg.registerSession('ahp-session:/s1');
+		reg.registerSession('ahp-session:/s1'); // still in flight → suppressed
 		expect(sent).toHaveLength(1);
 		release();
 		await flush();
-		reg.registerSession('s1'); // after settle → the replace re-sends (idempotent)
+		reg.registerSession('ahp-session:/s1'); // after settle → the replace re-sends (idempotent)
 		expect(sent).toHaveLength(2);
 	});
 
 	it('a failed register releases the slot so a later edge retries (no throw)', async () => {
 		const { host, sent, logs } = fakeHost({ fail: true });
 		const reg = new SessionToolRegistrar(host);
-		reg.registerSession('s1');
+		reg.registerSession('ahp-session:/s1');
 		await flush(); // drain the rejection + the finally cleanup
-		// The rejection was logged, never thrown up into the frame bus, and
+		// The rejection was logged, never thrown up into the event bus, and
 		// the in-flight guard cleared → the same id re-registers.
-		reg.registerSession('s1');
+		reg.registerSession('ahp-session:/s1');
 		await flush();
-		expect(sent.filter((s) => s.sessionId === 's1')).toHaveLength(2);
+		expect(sent.filter((s) => s.sessionUri === 'ahp-session:/s1')).toHaveLength(2);
 		expect(logs.some((l) => l.includes('failed'))).toBe(true);
 	});
 
-	it('sessionDisposed frees the id so a same-id re-open re-registers (review #4)', async () => {
+	it('sessionRemoved frees the id so a same-id re-open re-registers (review #4)', async () => {
 		const { host, sent } = fakeHost();
 		const reg = new SessionToolRegistrar(host);
-		reg.registerSession('s1');
+		reg.registerSession('ahp-session:/s1');
 		await flush();
-		reg.registerSession('s1'); // settled → replace re-sends anyway
+		reg.registerSession('ahp-session:/s1'); // settled → replace re-sends anyway
 		await flush();
-		reg.onSessionDisposed('s1');
-		reg.registerSession('s1'); // the disposed path must never leave a tombstone
+		reg.onSessionDisposed('ahp-session:/s1');
+		reg.registerSession('ahp-session:/s1'); // the removed path must never leave a tombstone
 		await flush();
-		expect(sent.filter((s) => s.sessionId === 's1').length).toBe(3);
+		expect(sent.filter((s) => s.sessionUri === 'ahp-session:/s1').length).toBe(3);
 	});
 
 	it('no workspace folder → skip with a log, no send', () => {
 		const { host, sent, logs } = fakeHost({ hasWorkspace: false });
-		new SessionToolRegistrar(host).registerSession('s1');
+		new SessionToolRegistrar(host).registerSession('ahp-session:/s1');
 		expect(sent).toHaveLength(0);
 		expect(logs.some((l) => l.includes('workspace'))).toBe(true);
 	});
