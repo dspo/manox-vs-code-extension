@@ -1,10 +1,13 @@
-// Transport backed by the manox napi native binding: the agent server runs
-// in-process on its own tokio runtime, and `FromServer` frames arrive through
-// a napi threadsafe function in Node callback style `(err, eventJson)`.
+// Transport backed by the manox napi native binding (dspo/manox v0.3.0): the
+// agent runtime runs in-process on its own tokio runtime, and the binding is
+// a raw AHP transport bridge — one end of an in-process JSON-RPC connection.
+// Host→client messages arrive through a napi threadsafe function invoked as
+// `callback(jsonRpcText)` (single argument; the v0.2 `(err, event)` Node
+// style is gone with protocol v2). The protocol itself — channels,
+// subscriptions, request correlation — lives in the AHP client layer
+// (`src/client/agentClient.ts`), not here.
 //
-// The Rust pump forwards every `FromServer` variant verbatim — v2
-// stream/host frames included — and `sendCommand` accepts every `FromClient`
-// variant. The binding is NOT bundled with the extension: it is staged by
+// The binding is NOT bundled with the extension: it is staged by
 // `script/build-napi` in the dspo/manox repository and located through
 // `manox.sdkRoot` / `VSCODE_AGENT_HOST_MANOX_SDK_ROOT` / `<extension>/native/`.
 //
@@ -21,7 +24,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Transport } from './transport';
 
-/** The napi binding surface (crates/manox-napi in dspo/manox). */
+/** The napi binding surface (crates/manox-napi in dspo/manox, v0.3.0): a raw
+ * AHP JSON-RPC transport bridge. The `start` callback keeps the napi-rs
+ * threadsafe-function convention — Node style `(err, text)`, err null on a
+ * delivered frame. (The lib.rs doc comment says "one JSON string"; the
+ * runtime delivers `(null, string)` — probe-verified against the v0.3.0
+ * addon, and the same convention the v0.2 binding used.) */
 interface NapiBinding {
 	ping(): string;
 	start(clientId: string, callback: (err: Error | null, event: string) => void): void;
@@ -71,12 +79,14 @@ export class NapiTransport implements Transport {
 	}
 
 	/**
-	 * Load the binding and start the agent server connection. `clientId` is
-	 * the persisted host identity (§D.2 Initialize) the extension mints once
-	 * (globalState) and replays on every re-init so the server re-seats the
-	 * same client; an empty string falls back to the legacy `"vscode"` pin.
-	 * `onDropped` receives raw frames this host's guards cannot parse
-	 * (version skew — logged, never fatal).
+	 * Load the binding and connect the in-process AHP transport. `clientId`
+	 * is the persisted host identity the extension mints once (globalState)
+	 * and replays on every activation so the server re-seats the same
+	 * client; it seeds the agent host's own identity (VS Code vs. desktop) —
+	 * the AHP handshake itself carries the protocol-level clientId. Raw
+	 * JSON-RPC text frames flow through `onRaw`; the AHP client layer is
+	 * the parse face. `onDropped` receives callback errors (logged, never
+	 * fatal — the next frame proves liveness).
 	 */
 	static load(options: {
 		sdkRoot: string;
@@ -88,6 +98,7 @@ export class NapiTransport implements Transport {
 		transport.binding.start(options.clientId, (err, raw) => {
 			if (err) {
 				console.error('manox transport error:', err);
+				options.onDropped?.(String(err));
 				return;
 			}
 			transport.events.emit('raw', raw);
@@ -99,7 +110,7 @@ export class NapiTransport implements Transport {
 		return this.readyPromise;
 	}
 
-	/** Raw JSON relay — the Wire adapter's guards are the parse face. */
+	/** Raw JSON-RPC relay — the AHP client layer is the parse face. */
 	onRaw(handler: (raw: string) => void): () => void {
 		this.events.on('raw', handler);
 		return () => this.events.off('raw', handler);

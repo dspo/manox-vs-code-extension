@@ -1,4 +1,4 @@
-// Code Tutor service assembly + the `registerSessionTools` lifecycle
+// Code Tutor service assembly + the client-tool contribution lifecycle
 // (§4, §9.2). One process-wide instance, installed lazily on the surface
 // that first holds an `AgentHost` (participant turn, sidebar resolve, panel
 // command) — activation never touches the runtime, so nothing here may run
@@ -8,16 +8,15 @@
 // a FULL REPLACE per (session, clientId) — replaying the complete set is
 // therefore the idempotent recovery for every lifecycle edge):
 //   - every session the host creates (participant: explicit call; others:
-//     the `sessionCreated` ServerNote, observed on the frame bus);
-//   - every session the sidebar follows (`streamOpen(followSession)` — the
-//     webview's open path, hooked from the sidebar provider);
-//   - everything the thread registry reports, once `connection.ready` lands.
+//     the `sessionAdded` relay event, observed on the event bus);
+//   - every session the sidebar claims (hooked from the sidebar provider);
+//   - everything the session catalogue already holds, once `ready` lands.
 //
 // The `registered` guard is deliberately NOT a permanent set (review #4):
 // server-side registration is in-memory and a session can be disposed and
 // cold-reopened under the SAME id, which must re-register. The controller
 // keeps only an in-flight guard plus a failed-retry tombstone, and clears on
-// `sessionDisposed`. The whole replace-per-register makes redundant calls
+// `sessionRemoved`. The whole replace-per-register makes redundant calls
 // harmless, so this errs toward re-sending.
 //
 // The registrar is extracted (`SessionToolRegistrar`) and vscode-free so a
@@ -30,14 +29,14 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { ExtensionContext, Memento } from 'vscode';
+import type { ToolDefinition } from '@microsoft/agent-host-protocol';
 import type { AgentHost } from '../agentHost';
 import { postToSidebar } from '../sidebar/sidebarProvider';
-import { clientToolSpec, registerSessionTools } from '../protocol/builders';
 import { ChainStore } from './chainStore';
 import { CodeChainPanel } from './panel';
 import { vscodeWorkspaceView, VscodeLspClient } from './lspClient';
 import { ChainNavigation } from './navigation';
-import { SessionToolRegistrar } from './sessionRegistrar';
+import { SessionToolRegistrar, toToolDefinition } from './sessionRegistrar';
 import { clientToolSpecs, CodeChainTools, type InvokeCall, type ReplySinks } from './tools';
 import type { ResolveDeps } from './resolve';
 
@@ -45,7 +44,7 @@ import type { ResolveDeps } from './resolve';
 
 interface CodeChainService {
 	readonly tools: CodeChainTools;
-	registerSession(sessionId: string): void;
+	registerSession(sessionUri: string): void;
 	openChain(chainId: string): boolean;
 	stepTour(dir: 'prev' | 'next'): void;
 	listChains(): ReturnType<ChainStore['list']>;
@@ -53,8 +52,8 @@ interface CodeChainService {
 
 let service: (CodeChainService & { dispose(): void }) | null = null;
 
-/** Invoke sink for the host's `invokeClientTool` interceptor branch
- * (agentHost.ts). Returns false when the name is not a code-chain tool. */
+/** Invoke sink for the host's `x-manox/invokeTool` handler (agentHost.ts).
+ * Returns false when the name is not a code-chain tool. */
 export async function invokeCodeChainTool(call: InvokeCall, reply: ReplySinks): Promise<boolean> {
 	if (!service) return false;
 	return service.tools.handle(call, reply);
@@ -99,30 +98,33 @@ export function ensureCodeChain(context: ExtensionContext, host: AgentHost): voi
 	});
 
 	const registrar = new SessionToolRegistrar({
-		send: (sessionId, specs) => host.connection.call(registerSessionTools(sessionId, host.clientId, specs)),
+		send: (sessionUri, toolsToContribute) =>
+			host.ready.then((manox) => manox.setActiveClientTools(sessionUri as never, toolsToContribute)),
 		hasWorkspace,
 		log,
-		tools: () => clientToolSpecs().map(clientToolSpec),
+		tools: () => clientToolSpecs().map(toToolDefinition),
 	});
 
 	const replayReady = async (): Promise<void> => {
 		try {
-			const threads = await host.connection.listThreads();
-			for (const thread of threads) registrar.registerSession(thread.id);
-			log(`ready replay: ${threads.length} session(s)`);
+			const manox = await host.ready;
+			for (const row of manox.rows()) registrar.registerSession(row.uri);
+			log(`ready replay: ${manox.rows().length} session(s)`);
 		} catch (e) {
 			log(`ready replay failed: ${String(e)}`);
 		}
 	};
-	void host.connection.ready.then(replayReady);
+	void host.ready.then(replayReady);
 
-	// Lifecycle edges on the frame bus (module header). `sessionCreated`
+	// Lifecycle edges on the event bus (module header). `sessionAdded`
 	// covers every creator including the webview's own sessions;
-	// `sessionDisposed` frees the registrar so a same-id re-open re-registers.
-	const unsubFrames = host.connection.onFrame((frame) => {
-		if (frame.kind !== 'notification') return;
-		if (frame.note.method === 'sessionCreated') registrar.registerSession(frame.note.sessionId);
-		else if (frame.note.method === 'sessionDisposed') registrar.onSessionDisposed(frame.note.sessionId);
+	// `sessionRemoved` frees the registrar so a same-id re-open re-registers.
+	const unsubEvents = host.onSessionEvent((event) => {
+		if (event.type === 'sessionAdded') {
+			registrar.registerSession((event.summary as { resource: string }).resource);
+		} else if (event.type === 'sessionRemoved') {
+			registrar.onSessionDisposed(event.session as string);
+		}
 	});
 
 	// The reverse-sync watcher attaches inside the panel constructor (once
@@ -130,12 +132,12 @@ export function ensureCodeChain(context: ExtensionContext, host: AgentHost): voi
 
 	service = {
 		tools,
-		registerSession: (id) => registrar.registerSession(id),
+		registerSession: (uri) => registrar.registerSession(uri),
 		openChain: (chainId) => panel.openChain(chainId),
 		stepTour: (dir) => panel.stepTour(dir),
 		listChains: () => store.list(),
 		dispose: () => {
-			unsubFrames();
+			unsubEvents();
 			navigation.dispose();
 			panel.dispose();
 			service = null;
@@ -145,12 +147,10 @@ export function ensureCodeChain(context: ExtensionContext, host: AgentHost): voi
 	log('service installed');
 }
 
-/** Sidebar follow-stream claim hook (sidebarProvider.trackStream): the
- * webview's openSession+streamOpen path materializes session ownership
- * there — hooking it keeps registration aligned with every card-capable
- * session even if the `sessionCreated` note raced installation. */
-export function codeChainRegisterSession(sessionId: string): void {
-	service?.registerSession(sessionId);
+/** Sidebar claim hook (sidebarProvider): a session the webview claims is
+ * card-capable, so its tool set must be contributed. */
+export function codeChainRegisterSession(sessionUri: string): void {
+	service?.registerSession(sessionUri);
 }
 
 export function codeChainOpenChain(chainId: string): boolean {

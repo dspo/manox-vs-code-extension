@@ -25,7 +25,13 @@
 import { execFile } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 
-import type { FromServer, ThreadListItem } from '../protocol/types';
+/** The summary-shaped row the filter admits: the AHP `SessionSummary` fields
+ * the rule reads. `project` is derived from the first working directory. */
+export interface ScopeRow {
+	resource: string;
+	project?: string;
+	[key: string]: unknown;
+}
 
 /** The git identity of a directory: the canonical common dir shared by every
  * worktree of its repository, or null outside git. */
@@ -54,7 +60,7 @@ export class WorkspaceThreadFilter {
 	/** Keep only the rows belonging to `cwd`'s repository. Rows the filter
 	 * cannot place (no `project`, or a directory outside git) fall back to
 	 * exact-path matching, which is the pre-worktree behavior. */
-	async ownedBy(rows: ThreadListItem[], cwd: string): Promise<ThreadListItem[]> {
+	async ownedBy(rows: ScopeRow[], cwd: string): Promise<ScopeRow[]> {
 		if (cwd === '') return rows;
 		const wanted = await this.identity(cwd);
 		if (wanted === null) {
@@ -63,7 +69,7 @@ export class WorkspaceThreadFilter {
 			return rows.filter((row) => !row.project || row.project === cwd);
 		}
 		const cache: Cache = new Map();
-		const kept: ThreadListItem[] = [];
+		const kept: ScopeRow[] = [];
 		for (const row of rows) {
 			const project = row.project;
 			if (!project) {
@@ -139,36 +145,42 @@ export function gitCommonDir(dir: string): Promise<RepoIdentity> {
 	});
 }
 
-// ── the relay's frame surgery ──────────────────────────────────────────────
+// ── the relay's catalogue surgery ───────────────────────────────────────────
 //
-// The registry arrives in TWO shapes during the dual-protocol window (the
-// legacy `ServerNote` and the `Host` event) and both fold into the same store
-// state, so both must be scoped identically. These helpers are pure frame
-// surgery and live here (not in `sidebarProvider.ts`) so they are testable
-// without a live vscode module.
+// The AHP session catalogue is per-row events plus `listSessions` results
+// (no full-mirror frame to rewrite), so the scoping helper takes rows in and
+// returns the kept rows. Lives here (not in `sidebarProvider.ts`) so it is
+// testable without a live vscode module.
 
-/** The thread rows a frame carries, or null when it carries none. */
-export function threadsOf(frame: FromServer): ThreadListItem[] | null {
-	if (frame.kind === 'host') {
-		const host = frame.host;
-		if (host?.type === 'threadsUpdated' && Array.isArray(host.threads)) return host.threads;
-		return null;
-	}
-	if (frame.kind !== 'notification') return null;
-	const note = frame.note;
-	if (note?.method === 'threadsUpdated' && Array.isArray(note.threads)) return note.threads;
-	return null;
+/** Map a `file://` working-directory URI to a path (best-effort). */
+export function fileUriToPath(uri: string): string | undefined {
+	if (!uri.startsWith('file://')) return undefined;
+	let path = decodeURIComponent(uri.slice('file://'.length));
+	// Strip a leading authority slash on POSIX (`file:///a/b` → `/a/b`).
+	path = path.replace(/^\/(?=[^/])/, '/');
+	return path;
 }
 
-/** `frame` with its thread rows replaced, in the SAME shape it arrived in.
- * Only ever called for a frame `threadsOf` accepted, so the fallthrough is
- * unreachable — it returns the frame untouched rather than throwing. */
-export function withThreads(frame: FromServer, threads: ThreadListItem[]): FromServer {
-	if (frame.kind === 'host') {
-		return { ...frame, host: { ...frame.host, threads } } as FromServer;
-	}
-	if (frame.kind === 'notification') {
-		return { ...frame, note: { ...frame.note, threads } } as FromServer;
-	}
-	return frame;
+/** Derive the filter's `project` from a session summary: the first working
+ * directory. */
+export function projectOfSummary(summary: { workingDirectories?: string[] }): string | undefined {
+	const first = summary.workingDirectories?.[0];
+	return first ? fileUriToPath(first) : undefined;
 }
+
+/** Scope an ordered set of session summaries to `cwd`'s repository. Async
+ * because identity lookups shell out to git; memoized per burst. */
+export async function threadsOwnedBy(
+	summaries: { resource: string; workingDirectories?: string[] }[],
+	cwd: string,
+	filter: WorkspaceThreadFilter = sharedFilter,
+): Promise<ScopeRow[]> {
+	const rows: ScopeRow[] = summaries.map((summary) => ({
+		...summary,
+		project: projectOfSummary(summary),
+	}));
+	return filter.ownedBy(rows, cwd);
+}
+
+/** The process-wide filter (identity cache is process-lifetime on purpose). */
+const sharedFilter = new WorkspaceThreadFilter(gitCommonDir, (m) => console.log(`manox sidebar: ${m}`));

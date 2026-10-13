@@ -85,11 +85,11 @@ describe('vscode bridge channel watchdog', () => {
     bridge.onMessage(listener);
     const ping = [...posted].reverse().find((p) => p.t === 'ping')!;
     dispatchHost({ t: 'pong', seq: ping.seq });
-    dispatchHost({ t: 'frame', frame: { kind: 'notification', note: { method: 'error' } } });
-    // Only the frame reached the listener (the fatal/notification path is
-    // irrelevant here — we just count that pong produced no listener call).
+    dispatchHost({ t: 'snapshot', channel: 'ahp-root://', state: { agents: [] } });
+    // Only the snapshot reached the listener (we just count that the pong
+    // produced no listener call).
     expect(listener).toHaveBeenCalledTimes(1);
-    expect(listener.mock.calls[0][0]).toMatchObject({ kind: 'notification' });
+    expect(listener.mock.calls[0][0]).toMatchObject({ t: 'snapshot' });
   });
 
   it('healthy pong stream keeps the channel alive indefinitely', () => {

@@ -1,25 +1,105 @@
-// Typed wire protocol hub. The single source of truth is the extension's
-// hand-maintained mirror of the Rust `manox-protocol` crate
-// (`../../src/protocol/types.ts`, protocol epoch 6, lock-step with manox
-// main). This module re-exports those types so the webview imports one hub,
-// and carries the UI-side projections of opaque `JsonValue` payloads below —
-// they are UI concerns, not wire contracts the server guarantees
-// structurally.
+// Typed protocol hub for the webview. Under AHP the wire vocabulary comes
+// from the `@microsoft/agent-host-protocol` SDK (the same types the host and
+// the Rust side generate from); this module re-exports the slices the webview
+// reads and carries:
+//
+//   * the UI view models the components render (threads rows, model rows,
+//     transcript-adjacent wire shapes) — UI concerns the webview OWNS, mapped
+//     from AHP state in the store fold, never a second wire contract;
+//   * the relay message vocabulary (the host sidebar proxies this webview's
+//     protocol traffic over one AHP connection).
 
-export * from '../../src/protocol/types';
+import type {
+	ChatState as AhpChatState,
+	ChatSummary as AhpChatSummary,
+	SessionState as AhpSessionState,
+	SessionSummary as AhpSessionSummary,
+} from '@microsoft/agent-host-protocol';
 
-import type { AnswerKind } from '../../src/protocol/types';
+export type { AhpChatState, AhpChatSummary, AhpSessionState, AhpSessionSummary };
 
-/** Renamed `HookKind` → `AnswerKind` at manox #795 (wire tags unchanged);
- * the alias keeps pre-rename call sites compiling during the port. */
-export type HookKind = AnswerKind;
+// ── view models (webview-owned; the store maps AHP state onto these) ───────
+
+/** One model row in the picker. Mapped from the root state's
+ * `agents[].models` (`SessionModelInfo`); the canonical display ref is
+ * `{provider}/{id}`. */
+export interface ModelInfo {
+	id: string;
+	name: string;
+	provider: string;
+	provider_name?: string;
+	api: string;
+	context_window: number;
+	max_tokens?: number;
+	config_id?: string;
+	agents?: string[];
+}
+
+/** One threads-list row. Mapped from `SessionSummary` plus the session's
+ * `x-manox-thread:/` bag (pin/label/leaf live there — AHP has no slot). The
+ * flag columns are the §D.5 mirror vocabulary the list has always rendered;
+ * `unread` is client-owned (GW5). */
+export interface ThreadListItem {
+	id: string;
+	title: string;
+	updated_at: number;
+	running: boolean;
+	/** Deprecated (GW5): always false; unread is client-owned state. */
+	unread: boolean;
+	errored: boolean;
+	pending_auth: boolean;
+	pending_plan: boolean;
+	background_work: boolean;
+	model_id: string;
+	pinned: boolean;
+	archived: boolean;
+	parent_id: string | null;
+	depth: number;
+	project?: string;
+	tag?: string;
+	approval_mode?: number;
+}
+
+export type ApprovalMode = 'read-only' | 'workspace-write' | 'danger-full-access';
+
+export type ReasoningEffort = 'high' | 'max';
+
+export type PlanVerdictChoice = 'execute_keep' | 'execute_compact' | 'refine';
+
+/** Base64 image attachment on a submitted message. */
+export interface ImageAttachment {
+	data: string;
+	mimeType: string;
+}
+
+/** One id-routed tri-state answer row of an ask-question card. */
+export interface AskAnswerRow {
+	id: string;
+	selected: string[];
+	custom?: string;
+}
+
+/** One question step of an AHP chat input request (elicitation): every
+ * question carries a stable `id` (answers route by it), an optional `detail`
+ * markdown support text, and an optional `intent` (`{kind, approve}` names
+ * the approving option label). Answers are tri-state: option selection(s),
+ * free text (`custom`), or skip. */
+export interface AskQuestionWire {
+	id?: string;
+	question: string;
+	header?: string;
+	detail?: string;
+	intent?: { kind: string; approve?: string };
+	multiSelect?: boolean;
+	options: { label: string; description?: string; recommended?: boolean }[];
+}
 
 /** User-side Goal lifecycle action (mirrors the gpui host's `/goal` verbs). */
 export type GoalAction = 'create' | 'edit' | 'replace' | 'clear' | 'pause' | 'resume';
 
-/** Wire vocabulary emitted by the actor (agent::ToolCallStatus, kebab-case).
- * The webview store folds terminal values into UI semantics
- * (success → completed, error → failed); the rest pass through. */
+/** Wire vocabulary emitted by the host for tool calls (kebab-case). The
+ * webview store folds terminal values into UI semantics (success →
+ * completed, error → failed); the rest pass through. */
 export type ToolCallStatus =
 	| 'pending-approval'
 	| 'running'
@@ -68,7 +148,7 @@ export interface GoalSnapshotWire {
 	updated_at: number;
 }
 
-// ── §E.3 Q-face: the `GetConversationInfo` response payload ────────────────
+// ── §E.3 Q-face: the metrics-channel aggregate ──────────────────────────────
 
 /** One per-model aggregate row of the §E.3 fold (`models[]`). */
 export interface ConversationModelRow {
@@ -96,9 +176,9 @@ export interface ConversationGit {
 	dirty: number;
 }
 
-/** The §E.3 `GetConversationInfo` response (on-demand fold, cached by
- * `(thread_id, cursor)` server-side; the client refreshes on committed-message
- * edges only). */
+/** The §E.3 metrics aggregate (the `x-manox-metrics:/<chat>` read model;
+ * under AHP it streams as channel state — `sessionInfo` on the metrics bag —
+ * instead of an on-demand reply). */
 export interface ConversationInfo {
 	threadId: string;
 	cursor: number;
@@ -139,3 +219,26 @@ export type SubagentChildWire =
 	| { kind: 'thinking'; text: string }
 	| { kind: 'tool_start'; id: string; name: string; hint?: { key: string; value: string } | null }
 	| { kind: 'tool_end'; id: string; name: string; is_error: boolean };
+
+// ── the relay vocabulary (mirrors src/sidebar/sidebarProvider.ts) ───────────
+
+/** Host → webview. `snapshot` seeds the fold for one channel; `event` keeps
+ * it current; `res` answers a `req`. */
+export type RelayToWebview =
+	| { t: 'snapshot'; channel: string; state: unknown }
+	| { t: 'event'; event: RelayEvent }
+	| { t: 'res'; id: string; ok: boolean; result?: unknown; error?: string }
+	| { t: 'verb'; kind: 'new_session' | 'open_turn_navigator' }
+	| { t: 'verb'; kind: 'code_chain'; sessionId: string; chainId: string; title: string; nodeCount: number }
+	| { t: 'config'; approvalMode: string }
+	| { t: 'boot'; cwd: string; approvalMode: string }
+	| { t: 'pong'; seq: number }
+	| { t: 'fatal'; message: string };
+
+/** A catalog event relayed from the host (the subset of `ManoxClient`
+ * RelayEvent the webview folds; action envelopes arrive verbatim). */
+export type RelayEvent =
+	| { readonly type: 'action'; readonly envelope: { channel: string; action: unknown; serverSeq?: number; origin?: unknown } }
+	| { readonly type: 'sessionAdded'; readonly summary: AhpSessionSummary }
+	| { readonly type: 'sessionRemoved'; readonly session: string }
+	| { readonly type: 'sessionSummaryChanged'; readonly session: string; readonly changes: Partial<AhpSessionSummary> };
