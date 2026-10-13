@@ -2,7 +2,7 @@
   "name": "manox-webview-ui",
   "version": "0.4.0",
   "private": true,
-  "description": "manox sidebar webview \u2014 the v2-native React frontend ported from the manox repo history (apps/web/webui @9c165b25), adapted to the standalone extension host.",
+  "description": "manox sidebar webview — the v2-native React frontend ported from the manox repo history (apps/web/webui @9c165b25), adapted to the standalone extension host.",
   "type": "module",
   "scripts": {
     "build": "node esbuild.mjs && npx tailwindcss -i src/sidebar/webview/styles/tokens.css -o ../dist/webview/bundle.css --minify",
@@ -35,5 +35,8 @@
     "typescript": "^5.6.0",
     "use-stick-to-bottom": "^1.1.6",
     "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "@microsoft/agent-host-protocol": "^1.0.0"
   }
 }

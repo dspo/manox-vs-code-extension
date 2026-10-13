@@ -1,8 +1,8 @@
 {
   "name": "manox-vscode",
   "displayName": "manox",
-  "description": "manox agent workbench inside VS Code \u2014 the headless manox runtime embedded in-process through the manox-napi binding, speaking protocol v2 (journal streams + projections + host events).",
-  "version": "0.7.0",
+  "description": "manox agent workbench inside VS Code — the headless manox runtime embedded in-process through the manox-napi binding (v0.3.0), speaking AHP 1.0.0 (channels + JSON-RPC + x-manox extensions).",
+  "version": "0.8.0",
   "publisher": "dspo",
   "license": "MIT",
   "engines": {
@@ -26,7 +26,7 @@
         "id": "manox",
         "fullName": "manox",
         "name": "manox",
-        "description": "manox agent \u2014 ask anything, it runs on the native manox runtime",
+        "description": "manox agent — ask anything, it runs on the native manox runtime",
         "isSticky": true
       }
     ],
@@ -158,5 +158,8 @@
     "esbuild": "^0.25.0",
     "typescript": "^5.6.0",
     "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "@microsoft/agent-host-protocol": "^1.0.0"
   }
 }
