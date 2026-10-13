@@ -26,11 +26,12 @@ const DICT = {
   cc_toggle_layout: { en: 'Switch layout (tree / focus)', zh: '切换布局（目录 / 导游卡片）' },
   // The focus card's "table of contents" drawer (the tree, as an overlay).
   cc_toc: { en: 'Contents', zh: '目录' },
-  cc_open_editor: { en: 'Open in editor', zh: '在编辑器中打开' },
-  cc_find_refs: { en: 'Find references', zh: '查找引用' },
-  cc_copy_path: { en: 'Copy symbol path', zh: '复制符号路径' },
-  cc_regen: { en: 'Regenerate this chain', zh: '重新生成这条链' },
-  cc_regenerate: { en: 'Regenerate', zh: '重新生成' },
+  // The node's references drawer that sits under the explanation. "Find
+  // References" is permanent copy, so it stays English in both locales.
+  cc_find_refs: { en: 'Find References', zh: 'Find References' },
+  cc_refs_loading: { en: 'Searching…', zh: '查询中…' },
+  cc_refs_none: { en: 'No references found', zh: '未找到引用' },
+  cc_refs_count: { en: (n: number) => `${n} reference${n === 1 ? '' : 's'}`, zh: (n: number) => `${n} 处引用` },
   cc_unresolved: { en: 'unresolved', zh: '未解析' },
   cc_ambiguous: { en: 'ambiguous', zh: '有歧义' },
   cc_stale: { en: 'stale', zh: '已失效' },

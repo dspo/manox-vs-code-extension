@@ -34,7 +34,6 @@ type HostEnvelope =
 	| { t: 'verb'; kind: 'new_session' }
 	| { t: 'verb'; kind: 'open_turn_navigator' }
 	| { t: 'verb'; kind: 'code_chain'; sessionId: string; chainId: string; title: string; nodeCount: number }
-	| { t: 'verb'; kind: 'compose'; text: string; sessionId: string }
 	| { t: 'config'; approvalMode: string }
 	| { t: 'boot'; cwd: string; approvalMode: string }
 	| { t: 'pong'; seq: number }

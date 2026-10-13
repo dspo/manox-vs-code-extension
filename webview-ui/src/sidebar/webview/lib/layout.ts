@@ -1,32 +1,31 @@
-// Breakpoint layout for the conversation view: the info card joins the
-// conversation column as the container widens, then the session list.
-// The card breakpoint is the message-content floor plus the card gutter,
-// so the content never drops below the floor in any layout.
+// Breakpoint layout for the conversation view: the session list joins the
+// conversation column as the container widens.
+//
+// There is NO info-card breakpoint any more. The conversation-info card is an
+// overlay opened from the header chip (`plugins/conversation-info`), so it no
+// longer claims a column the transcript had to clear — see the note in
+// `components/conversation-view.tsx`. The card's width below is only the
+// overlay's own size, not a reservation.
 
-// The widths the breakpoints derive from; declared first so the derived
-// constants below can reference them.
+/** The info overlay's own width (the panel the header chip opens). */
 export const INFO_CARD_WIDTH_PX = 260;
-// Right gutter the transcript reserves so messages clear the floating card
-// and its shadow.
-export const INFO_CARD_GUTTER_PX = INFO_CARD_WIDTH_PX + 36;
 export const CONVERSATION_MIN_PX = 480;
 // Sash width the session list leaves beside the conversation column
 // (SidebarSash's w-1).
 export const SASH_PX = 4;
 
-export const INFO_CARD_BREAKPOINT_PX = CONVERSATION_MIN_PX + INFO_CARD_GUTTER_PX;
 export const SESSION_LIST_BREAKPOINT_PX = 1120;
 
-export type ChatLayout = 'conversation' | 'conversation-info' | 'list-conversation-info';
+export type ChatLayout = 'conversation' | 'list-conversation';
 
 export function chatLayoutForWidth(width: number): ChatLayout {
-  if (width >= SESSION_LIST_BREAKPOINT_PX) return 'list-conversation-info';
-  if (width >= INFO_CARD_BREAKPOINT_PX) return 'conversation-info';
+  if (width >= SESSION_LIST_BREAKPOINT_PX) return 'list-conversation';
   return 'conversation';
 }
 
 /** Widest the session list may grow while the message content keeps at
- * least CONVERSATION_MIN_PX beside the card gutter and the sash. */
+ * least CONVERSATION_MIN_PX beside the sash. The card's overlay floats over
+ * the transcript and reserves nothing, so it is not part of this budget. */
 export function maxSessionListWidth(width: number): number {
-  return Math.max(0, width - CONVERSATION_MIN_PX - INFO_CARD_GUTTER_PX - SASH_PX);
+  return Math.max(0, width - CONVERSATION_MIN_PX - SASH_PX);
 }

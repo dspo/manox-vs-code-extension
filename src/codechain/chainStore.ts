@@ -1,6 +1,6 @@
 // Chain registry + persistence (§7). Chains outlive their session: the
-// journal cards and the Regenerate affordance reopen a panel from the stored
-// row alone, so the store keeps whole `CodeChain` records keyed by chainId.
+// journal cards reopen a panel from the stored row alone, so the store keeps
+// whole `CodeChain` records keyed by chainId.
 //
 // The backing map is injected (`ChainStoreSink`) so the pure fold — keying,
 // caps, LRU eviction, list order, and SHAPE VALIDATION of read rows — is

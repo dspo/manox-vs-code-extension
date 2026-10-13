@@ -15,7 +15,7 @@
 import * as vscode from 'vscode';
 import { errorText } from '../util';
 import type { ChainRange } from './types';
-import type { LspClient, LspItem, LspLocation, LspSymbol, WorkspaceView } from './resolve';
+import type { LspClient, LspItem, LspLocation, LspReference, LspSymbol, WorkspaceView } from './resolve';
 import { PROVIDER_TIMEOUT_MS } from './resolve';
 
 const chainRange = (r: vscode.Range): ChainRange => ({
@@ -142,6 +142,30 @@ export class VscodeLspClient implements LspClient {
 				uri: s.location.uri.toString(),
 				range: chainRange(s.location.range),
 				name: s.name,
+			}));
+	}
+
+	async references(
+		uri: string,
+		pos: { line: number; character: number },
+	): Promise<LspReference[]> {
+		// The panel's read-only references drawer. Same `provider` discipline
+		// as every other probe: an absent or wedged reference provider answers
+		// "no references here" instead of an error the drawer would have to
+		// render.
+		const doc = await this.open(uri);
+		if (!doc) return [];
+		const locations = await provider<vscode.Location[]>(
+			'vscode.executeReferenceProvider',
+			NONE,
+			doc.uri,
+			position(pos.line, pos.character),
+		);
+		return (locations ?? [])
+			.filter((loc) => loc?.uri && loc.range)
+			.map((loc) => ({
+				uri: loc.uri.toString(),
+				range: chainRange(loc.range),
 			}));
 	}
 

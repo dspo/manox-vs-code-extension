@@ -46,8 +46,6 @@ import { findNode, TOOL_NAMES, type CodeChainTools } from './tools';
 const TUTOR_VIEW_ID = 'manox.tutorView';
 
 export interface PanelSinks {
-	/** `{t:'verb', kind:'compose'}` backfill into the sidebar composer. */
-	compose(text: string, sessionId: string): void;
 	log(message: string): void;
 }
 
@@ -74,6 +72,9 @@ export class CodeChainPanel implements vscode.WebviewViewProvider {
 	private tourIndex = -1;
 	private tourNodeId: string | null = null;
 	private lastSync: string | null = null;
+	/** Monotonic token for the references drawer: only the newest request may
+	 * post, so a slow provider cannot overwrite a newer query's answer. */
+	private refsRequest = 0;
 	private readonly disposables: vscode.Disposable[] = [];
 
 	constructor(
@@ -267,26 +268,43 @@ export class CodeChainPanel implements vscode.WebviewViewProvider {
 				this.pickCandidate(msg.nodeId, msg.index);
 				return;
 			case 'findRefs':
-				if (this.chain) void this.navigation.findReferences(this.chain, msg.nodeId);
+				void this.sendReferences(msg.nodeId);
 				return;
-			case 'regen':
-				// The compose prefill is ownership-scoped: it is only ever
-				// accepted by the composer showing the owning thread
-				// (`shouldApplyComposePrefill`). A note without a real
-				// sessionId would be dropped there anyway, so don't send a
-				// malformed one (review round-2, issue — `?? ''` used to let
-				// an empty owner through).
-				if (!this.chain?.sessionId) {
-					this.sinks.log('regen dropped: no owning session for the open chain');
-					return;
-				}
-				this.sinks.compose(`/tutor ${msg.question}`, this.chain.sessionId);
+			case 'openRef':
+				// A reference row's own location (code outside the chain):
+				// same jump + decoration the node clicks use, but addressed by
+				// uri/range instead of a chain node.
+				void this.navigation.showLocation(msg.uri, msg.range, false);
 				return;
 			case 'log':
 				this.sinks.log(`panel[${msg.level}]: ${msg.message}`);
 				return;
 			default:
 				return; // unknown vocabulary drops (L12 discipline)
+		}
+	}
+
+	/** Answer a drawer open with the node's live references. The query is
+	 * re-run every time (a cached answer would silently go stale as the user
+	 * edits) and the panel token below drops a reply the user has already
+	 * navigated away from — otherwise a slow provider would repaint the
+	 * drawer of a node that is no longer on screen. */
+	private async sendReferences(nodeId: string): Promise<void> {
+		const chain = this.chain;
+		if (!chain) return;
+		this.refsRequest += 1;
+		const token = this.refsRequest;
+		try {
+			const hits = await this.navigation.listReferences(chain, nodeId);
+			if (token !== this.refsRequest || this.chain !== chain) return;
+			this.post({ t: 'references', nodeId, hits });
+		} catch (e) {
+			// `listReferences` is documented not to reject; if it ever does,
+			// the drawer must not hang on "loading" forever — an empty answer
+			// is the same read-only outcome as "no references".
+			this.sinks.log(`references lookup failed for ${nodeId}: ${e instanceof Error ? e.message : String(e)}`);
+			if (token !== this.refsRequest || this.chain !== chain) return;
+			this.post({ t: 'references', nodeId, hits: [] });
 		}
 	}
 
