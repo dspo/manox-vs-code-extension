@@ -1,54 +1,35 @@
 // Bridge over the VS Code webview API: postMessage out to the extension
 // host, window messages in. Selected only when acquireVsCodeApi is present.
 //
-// The host relay wraps protocol frames in small envelopes (`{t:'frame'}`)
-// and adds host-state pushes the sandbox cannot read itself:
-//   * `{t:'boot', cwd, approvalMode}` — workspace facts for CreateSession;
-//   * `{t:'config', approvalMode}` — settings changes while live;
-//   * `{t:'verb', kind:'new_session'}` — the host command / title-bar button;
+// The host relay wraps the AHP protocol faces in small envelopes:
+//   * `{t:'snapshot', channel, state}` — the fold seed for one channel;
+//   * `{t:'event', event}` — every relayed action envelope / catalogue change;
+//   * `{t:'res', id, ok, result?, error?}` — a `req` reply;
+//   * `{t:'boot', cwd, approvalMode}` / `{t:'config', approvalMode}` —
+//     workspace facts for createSession and live settings pushes;
+//   * `{t:'verb', kind:'new_session'|'open_turn_navigator'|'code_chain', …}`
+//     — host commands the sandbox cannot fulfill itself;
 //   * `{t:'fatal', message}` — host-side activation failure (addon missing,
-//     state-root lock contention).
-// Outbound, the webview posts `FromClient` frames (wrapped as `{t:'frame'}`),
-// `{t:'log'}` diagnostics, and the watchdog heartbeat `{t:'ping', seq}` (the
-// host echoes `{t:'pong', seq}`; see state/watchdog.ts). Session lifecycle
-// rides the wire — there are no host-only verbs any more; the relay is
-// transparent.
+//     handshake refused).
+// Outbound, the webview posts the relay faces (`req`/`dispatch`/`view`/
+// `refresh`), `{t:'log'}` diagnostics, and the watchdog heartbeat
+// `{t:'ping', seq}` (the host echoes `{t:'pong', seq}`; see state/watchdog.ts).
 //
-// T7: the extension host owns the napi connection (and the v2 frame guards),
+// The extension host owns the AHP connection (one `initialize`, one client),
 // so the webview sees one stable connection generation — `onConnection` is a
-// no-op subscription (no reseat loop on this transport). That stability is
-// exactly why the watchdog lives HERE: with `retainContextWhenHidden`, a
-// graceful extension-host restart can silently kill this transport's inbound
-// direction (frames posted by the new host never reach the retained iframe),
-// and nothing else in the webview can see the difference — so the heartbeat
-// + self-heal reload is a transport-liveness concern owned by the transport.
-import type { FromClient, FromServer } from '../../../protocol';
-import type { HostNote, ToHost } from '../../messages';
+// no-op subscription. That stability is exactly why the watchdog lives HERE:
+// with `retainContextWhenHidden`, a graceful extension-host restart can
+// silently kill this transport's inbound direction (messages posted by the
+// new host never reach the retained iframe), and nothing else in the webview
+// can see the difference — so the heartbeat + self-heal reload is a
+// transport-liveness concern owned by the transport.
+import type { HostNote, ToHost, ToWebview } from '../../messages';
 import { createChannelWatchdog } from '../state/watchdog';
 import type { Bridge } from './bridge';
 import { setBootFacts } from './host-facts';
 
-/** Host → webview envelope (mirror of the extension's ToWebview). */
-type HostEnvelope =
-	| { t: 'frame'; frame: FromServer }
-	| { t: 'verb'; kind: 'new_session' }
-	| { t: 'verb'; kind: 'open_turn_navigator' }
-	| { t: 'verb'; kind: 'code_chain'; sessionId: string; chainId: string; title: string; nodeCount: number }
-	| { t: 'config'; approvalMode: string }
-	| { t: 'boot'; cwd: string; approvalMode: string }
-	| { t: 'pong'; seq: number }
-	| { t: 'fatal'; message: string };
-
-/** Webview → host envelope. Protocol frames ride `{t:'frame'}`; anything
- * already carrying a `t` tag (the code-chain `openCodeChain` ask) is
- * passed through verbatim — the host mirrors this union in its ToHost. */
-type WebviewEnvelope =
-	| ({ t: string } & Record<string, unknown>)
-	| { t: 'frame'; frame: FromClient }
-	| { t: 'log'; level: 'info' | 'warn' | 'error'; message: string };
-
 interface VscodeHostApi {
-	postMessage(msg: WebviewEnvelope): void;
+	postMessage(msg: ToHost | { t: 'log'; level: 'info' | 'warn' | 'error'; message: string }): void;
 }
 
 declare function acquireVsCodeApi(): VscodeHostApi;
@@ -57,24 +38,18 @@ declare function acquireVsCodeApi(): VscodeHostApi;
  * the state machine's ping interval are one knob — see createVscodeBridge). */
 export const WATCHDOG_PING_INTERVAL_MS = 5_000;
 
-/** Re-request the global registries after a host-side restart signal. The
+/** Re-push the folded state after a host-side restart signal. The
  * retained-iframe failure mode leaves the outbound webview→host direction
- * working while inbound frames go undelivered, so a fresh `boot`/`config`
+ * working while inbound messages go undelivered, so a fresh `boot`/`config`
  * (re-pushed by a healthy host after an extension install/activation) is a
- * chance to refetch models/threads WITHOUT a reload — idempotent wire
- * requests riding the surviving direction; the receipts restore a store
- * frozen at pre-restart state. (The §D.2 reference is the request/receipt
- * correlation the pending table uses; receipts are plain refreshes.)
- * `ready` is deliberately not posted: the sidebar host relay has no
- * `{t:'ready'}` inbound case (the code-chain panel owns that handshake), so
- * it would be a tolerated unknown out — pointless as a restart probe.
+ * chance to re-seed the store WITHOUT a reload — a `refresh` ask riding the
+ * surviving direction; the host answers with fresh snapshot pushes.
  * Dynamic import breaks the static `api/client → api/vscode-bridge` cycle;
  * the module is already loaded at boot (client.ts creates this bridge). */
 function resyncRegistries(): void {
 	void import('./client')
 		.then(({ api }) => {
-			api.requestModels();
-			api.listThreads();
+			api.refresh();
 		})
 		.catch(() => undefined);
 }
@@ -92,7 +67,7 @@ function host(): VscodeHostApi {
 
 export function createVscodeBridge(): Bridge {
 	const vscode = host();
-	const listeners = new Set<(message: FromServer | HostNote) => void>();
+	const listeners = new Set<(message: ToWebview) => void>();
 
 	// Heartbeat watchdog over the host→webview channel (state/watchdog.ts).
 	// The scheduler is deliberately coarse (one tick per ping interval): a
@@ -110,7 +85,7 @@ export function createVscodeBridge(): Bridge {
 	const reloadSelf = (): void => {
 		clearInterval(heartbeat);
 		document.removeEventListener('visibilitychange', onVisibility);
-		window.location.reload(); // iframe rebuild == channel rebuild; the fresh boot re-requests models/threads
+		window.location.reload(); // iframe rebuild == channel rebuild; the fresh boot re-pushes the fold
 	};
 	const heartbeat = setInterval(() => {
 		if (watchdog.tick() === 'ping') sendPing();
@@ -136,15 +111,17 @@ export function createVscodeBridge(): Bridge {
 	// waiting one interval.
 	if (watchdog.onMount() === 'ping') sendPing();
 	window.addEventListener('message', (raw: MessageEvent) => {
-		const msg = raw.data as HostEnvelope | undefined;
-		if (!msg || typeof msg !== 'object') return;
+		const msg = raw.data as ToWebview | undefined;
+		if (!msg || typeof msg !== 'object' || typeof (msg as { t?: unknown }).t !== 'string') return;
 		// Liveness evidence for the watchdog: anything that reaches this
 		// listener proves the host→webview direction is alive; pongs
 		// additionally confirm the ping/pong round trip.
 		watchdog.onAnyHostMessage();
 		switch (msg.t) {
-			case 'frame':
-				for (const listener of listeners) listener(msg.frame);
+			case 'snapshot':
+			case 'event':
+			case 'res':
+				for (const listener of listeners) listener(msg);
 				return;
 			case 'boot':
 				setBootFacts({ cwd: msg.cwd, approvalMode: msg.approvalMode });
@@ -170,29 +147,14 @@ export function createVscodeBridge(): Bridge {
 			case 'fatal':
 				// Render through the ordinary error-banner path: a global
 				// error note the store folds into `error`.
-				resyncRegistries();
-				for (const listener of listeners) {
-					listener({
-						kind: 'notification',
-						note: { method: 'error', sessionId: null, message: msg.message },
-					} as FromServer);
-				}
+				for (const listener of listeners) listener(msg);
 				return;
 		}
 	});
 
 	return {
 		post(message: ToHost) {
-			// The code-chain card click (`{t:'openCodeChain'}`) is a
-			// first-class host affordance, not a protocol frame — pass it
-			// through on its own `t` tag; the host relay mirrors the union
-			// in `sidebarProvider.ToHost`. Everything else is a `FromClient`
-			// wrapped in the `{t:'frame'}` envelope.
-			if ('t' in message) {
-				vscode.postMessage(message);
-				return;
-			}
-			vscode.postMessage({ t: 'frame', frame: message });
+			vscode.postMessage(message);
 		},
 		onMessage(listener) {
 			listeners.add(listener);

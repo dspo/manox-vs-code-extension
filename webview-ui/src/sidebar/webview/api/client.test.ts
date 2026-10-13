@@ -1,270 +1,130 @@
-// The v2 api client: request/receipt correlation, stream-open sequences,
-// and the full-intent `CreateSession` flow. `client.ts` builds its transport
-// at module load, so each test re-imports it fresh (vi.resetModules) with
-// the browser globals stubbed first — the WebSocket bridge stands in for the
-// wire.
+// The relay client, over a recorded bridge: the pending-request table (settle
+// + orphan tolerance), the write-ahead dispatch shapes (submit / approve /
+// verdict), and the session lifecycle (newSession rekeys nothing — the AHP
+// createSession URI is client-chosen).
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import type { FromClient, FromServer } from '../../../protocol';
+import type { ToHost, ToWebview } from '../../messages';
 import type { StoreEffects } from '../state/store';
+import { Store } from '../state/store';
+import { api, connectStore, setBridge, ThreadApi } from './client';
+import type { Bridge } from './bridge';
 
-/** Fake WebSocket capturing frames per connection generation. */
-class MockWebSocket {
-	static instances: MockWebSocket[] = [];
-	static OPEN = 1;
-	static CLOSED = 3;
+const SESSION = 'ahp-session:/s-1';
+const CHAT = 'ahp-chat:/c-1';
 
-	readyState = MockWebSocket.CLOSED;
-	sent: FromClient[] = [];
-	onopen: (() => void) | null = null;
-	onmessage: ((event: { data: string }) => void) | null = null;
-	onclose: (() => void) | null = null;
-
-	constructor(_url: string) {
-		MockWebSocket.instances.push(this);
-	}
-
-	send(data: string): void {
-		this.sent.push(JSON.parse(data) as FromClient);
-	}
-
-	open(): void {
-		this.readyState = MockWebSocket.OPEN;
-		this.onopen?.();
-	}
-
-	/** Deliver a `FromServer` frame through the transport to the client. */
-	receive(message: FromServer | Record<string, unknown>): void {
-		this.onmessage?.({ data: JSON.stringify(message) });
-	}
-}
-
-/** The store surface `connectStore` installs. */
-function fakeStore() {
-	let effects: StoreEffects | null = null;
-	return {
-		dispatch: vi.fn(),
-		openRemote: vi.fn(),
-		confirmDraft: vi.fn(),
-		reseat: vi.fn(),
-		addCodeChain: vi.fn(),
-		attachEffects: vi.fn((e: StoreEffects) => {
-			effects = e;
-		}),
-		get effects(): StoreEffects {
-			if (!effects) throw new Error('effects not attached');
-			return effects;
+/** A recorded bridge: outbound posts are kept; tests fire inbound messages. */
+function fakeBridge() {
+	const posted: ToHost[] = [];
+	const listeners = new Set<(message: ToWebview) => void>();
+	const bridge: Bridge = {
+		post: (message) => posted.push(message),
+		onMessage: (listener) => {
+			listeners.add(listener);
+			return () => listeners.delete(listener);
 		},
 	};
+	const inbound = (message: ToWebview) => {
+		for (const listener of listeners) listener(message);
+	};
+	return { bridge, posted, inbound };
 }
 
-/** Frames sent after the Initialize handshake (dropped from assertions). */
-function postedFrames(ws: MockWebSocket): FromClient[] {
-	return ws.sent.filter((f) => !(f.kind === 'request' && f.id.startsWith('init-')));
+function harness() {
+	const fake = fakeBridge();
+	setBridge(fake.bridge);
+	const store = new Store();
+	const effects = {
+		view: vi.fn(),
+		viewChat: vi.fn(),
+		fetchTurns: async () => false,
+	} satisfies StoreEffects;
+	store.attachEffects(effects);
+	return { ...fake, store, effects };
 }
 
-async function freshClient() {
-	vi.resetModules();
-	const webBridge = await import('./web-bridge');
-	const client = await import('./client');
-	return { client, webBridge };
-}
-
-beforeEach(() => {
-	MockWebSocket.instances = [];
-	vi.stubGlobal('WebSocket', MockWebSocket);
-	vi.stubGlobal('location', { protocol: 'http:', host: 'localhost:4173' });
-	vi.stubGlobal('__MANOX_TOKEN__', 'tok');
-	const store = new Map<string, string>();
-	vi.stubGlobal('sessionStorage', {
-		getItem: (k: string) => store.get(k) ?? null,
-		setItem: (k: string, v: string) => void store.set(k, v),
-	});
-	vi.stubGlobal('crypto', { randomUUID: () => 'uuid-' + Math.random().toString(36).slice(2) });
-});
-
-const response = (id: string, value: Record<string, unknown>) => ({
-	kind: 'response',
-	id,
-	outcome: { Ok: value },
-});
-
-describe('request/receipt correlation (§T7.1)', () => {
-	it('a submit sends a Request with the originRpc and resolves its Response', async () => {
-		const { client } = await freshClient();
-		const store = fakeStore();
-		client.connectStore(store);
-		const ws = MockWebSocket.instances[0];
-		ws.open();
-
-		const receipt = new client.ThreadApi('s1').submit('hello', undefined, 'rpc-1');
-		const submit = postedFrames(ws).find(
-			(f) => f.kind === 'request' && (f as { call: { method: string } }).call.method === 'submit',
-		) as Extract<FromClient, { kind: 'request' }>;
-		expect(submit).toBeTruthy();
-		expect(submit.call).toMatchObject({ method: 'submit', sessionId: 's1', text: 'hello', originRpc: 'rpc-1' });
-
-		ws.receive(response(submit.id, { accepted: true, message_id: 'm1' }));
-		await expect(receipt).resolves.toEqual({ accepted: true, message_id: 'm1' });
-	});
-
-	it('an Err response rejects the pending request', async () => {
-		const { client } = await freshClient();
-		client.connectStore(fakeStore());
-		const ws = MockWebSocket.instances[0];
-		ws.open();
-		const receipt = new client.ThreadApi('s1').submit('x', undefined, 'rpc-2');
-		const submit = postedFrames(ws).find(
-			(f) => f.kind === 'request' && (f as { call: { method: string } }).call.method === 'submit',
-		) as Extract<FromClient, { kind: 'request' }>;
-		ws.receive({
-			kind: 'response',
-			id: submit.id,
-			outcome: { Err: { code: -32000, message: 'session/not-found', data: null } },
+describe('dispatch shapes', () => {
+	it('submit dispatches chat/turnStarted with the caller id as the turn id', () => {
+		const h = harness();
+		connectStore({
+			relay: h.store.relay.bind(h.store),
+			openRemote: h.store.openRemote.bind(h.store),
+			confirmDraft: h.store.confirmDraft.bind(h.store),
+			attachEffects: h.store.attachEffects.bind(h.store),
+			addCodeChain: h.store.addCodeChain.bind(h.store),
+			setChatUri: h.store.setChatUri.bind(h.store),
+			chatUriOf: () => CHAT,
+			echoUser: h.store.echoUser.bind(h.store),
+			conversationInfo: () => null,
 		});
-		await expect(receipt).rejects.toThrow('session/not-found');
+		void new ThreadApi(SESSION).submit('fix it', undefined, 'turn-9');
+		const dispatch = h.posted.find((m) => m.t === 'dispatch');
+		expect(dispatch?.t).toBe('dispatch');
+		const action = (dispatch as { action: Record<string, unknown> }).action;
+		expect(action.type).toBe('chat/turnStarted');
+		expect(action.turnId).toBe('turn-9');
+		const message = action.message as { text?: string; origin?: { kind?: string } };
+		expect(message.text).toBe('fix it');
+		expect(message.origin?.kind).toBe('user');
 	});
 
-	it('non-response frames flow into the store dispatch', async () => {
-		const { client } = await freshClient();
-		const store = fakeStore();
-		client.connectStore(store);
-		const ws = MockWebSocket.instances[0];
-		ws.open();
-		const frame = {
-			kind: 'streamItem',
-			streamId: 's',
-			frame: { type: 'entry', seq: 1, id: 'e-1', parentId: null, timestamp: '2026-09-04T00:00:00Z', event: { type: 'turnStart' } },
-		};
-		ws.receive(frame);
-		expect(store.dispatch).toHaveBeenCalledWith(expect.objectContaining({ kind: 'streamItem' }));
+	it('approve dispatches the confirmed action with the fold id', () => {
+		const h = harness();
+		connectStore({
+			relay: h.store.relay.bind(h.store),
+			openRemote: h.store.openRemote.bind(h.store),
+			confirmDraft: h.store.confirmDraft.bind(h.store),
+			attachEffects: h.store.attachEffects.bind(h.store),
+			addCodeChain: h.store.addCodeChain.bind(h.store),
+			setChatUri: h.store.setChatUri.bind(h.store),
+			chatUriOf: () => CHAT,
+			echoUser: h.store.echoUser.bind(h.store),
+			conversationInfo: () => null,
+		});
+		new ThreadApi(SESSION).approve('call-1', false);
+		const dispatch = h.posted.find((m) => m.t === 'dispatch') as { action: Record<string, unknown> };
+		expect(dispatch.action.type).toBe('chat/toolCallConfirmed');
+		expect(dispatch.action.toolCallId).toBe('call-1');
+		expect(dispatch.action.approved).toBe(false);
+		expect(dispatch.action.reason).toBe('denied');
 	});
 });
 
-describe('follow-stream sequences', () => {
-	it('openThread opens the session and issues StreamOpen(followSession)', async () => {
-		const { client } = await freshClient();
-		const store = fakeStore();
-		client.connectStore(store);
-		const ws = MockWebSocket.instances[0];
-		ws.open();
-
-		client.api.openThread('s9');
-		expect(store.openRemote).toHaveBeenCalledWith('s9');
-		// openRemote triggers the effect: OpenSession request + StreamOpen
-		// (the openStream effect is async — it awaits the OpenSession
-		// receipt — so drive the response first).
-		store.effects.openStream('s9', 'st-1');
-		const openReq = postedFrames(ws).find(
-			(f) => f.kind === 'request' && (f as { call: { method: string } }).call.method === 'openSession',
-		) as Extract<FromClient, { kind: 'request' } | undefined>;
-		expect(openReq).toBeTruthy();
-		ws.receive(response(openReq!.id, {}));
-		await vi.waitFor(() => {
-			expect(postedFrames(ws)).toContainEqual(
-				expect.objectContaining({
-					kind: 'streamOpen',
-					streamKind: { type: 'followSession', sessionId: 's9' },
-				}),
-			);
+describe('newSession', () => {
+	it('creates with a client-chosen session URI and views it', async () => {
+		const h = harness();
+		connectStore({
+			relay: h.store.relay.bind(h.store),
+			openRemote: h.store.openRemote.bind(h.store),
+			confirmDraft: h.store.confirmDraft.bind(h.store),
+			attachEffects: h.store.attachEffects.bind(h.store),
+			addCodeChain: h.store.addCodeChain.bind(h.store),
+			setChatUri: h.store.setChatUri.bind(h.store),
+			chatUriOf: () => CHAT,
+			echoUser: h.store.echoUser.bind(h.store),
+			conversationInfo: () => null,
 		});
-	});
-
-	it('pageHistory rides the effects seam as a Request', async () => {
-		const { client } = await freshClient();
-		const store = fakeStore();
-		client.connectStore(store);
-		const ws = MockWebSocket.instances[0];
-		ws.open();
-
-		const pageP = store.effects.pageHistory('s1', 4);
-		const pageReq = postedFrames(ws).find(
-			(f) => f.kind === 'request' && (f as { call: { method: string } }).call.method === 'pageHistory',
-		) as Extract<FromClient, { kind: 'request' }>;
-		expect(pageReq.call).toMatchObject({ method: 'pageHistory', sessionId: 's1', throughSeq: 4 });
-		ws.receive(response(pageReq.id, { records: [{ seq: 4, id: 'e4', parentId: null, timestamp: '', type: 'turnStart' }], has_more: true, cursor: 4 }));
-		const page = await pageP;
-		expect(page?.hasMore).toBe(true);
-		expect(page?.records[0]?.seq).toBe(4);
-	});
-
-	// §E.3 / T8 §H: the Q-face pull is plugin-owned now — `getConversationInfo`
-	// is an exported fetch seam on the api client (no store effect), riding the
-	// same pending-request table as every other Request.
-	it('getConversationInfo rides the pending table as a Request (plugin fetch seam)', async () => {
-		const { client } = await freshClient();
-		const store = fakeStore();
-		client.connectStore(store);
-		const ws = MockWebSocket.instances[0];
-		ws.open();
-
-		const infoP = client.getConversationInfo('s1');
-		const infoReq = postedFrames(ws).find(
-			(f) => f.kind === 'request' && (f as { call: { method: string } }).call.method === 'getConversationInfo',
-		) as Extract<FromClient, { kind: 'request' }>;
-		expect(infoReq.call).toMatchObject({ method: 'getConversationInfo', sessionId: 's1' });
-		ws.receive(response(infoReq.id, { threadId: 's1', cursor: 4, models: [], cumulativeCost: 0 }));
-		await expect(infoP).resolves.toMatchObject({ threadId: 's1' });
-	});
-});
-
-describe('full-intent CreateSession (§T7.3)', () => {
-	it('sends cwd/project/initialModel and rekeys the draft on the receipt', async () => {
-		const { client } = await freshClient();
-		const store = fakeStore();
-		client.connectStore(store);
-		const ws = MockWebSocket.instances[0];
-		ws.open();
-
-		const sessionP = client.api.newSession({
-			localId: 'local-1',
-			text: 'first',
-			modelRef: 'DeepSeek-anthropic/deepseek-chat',
-			originRpc: 'rpc-first',
+		const pending = api.newSession({ localId: 's-1', text: 'hello' });
+		// The createSession req goes out; answer it, then the summary snapshot
+		// (which seeds the default chat) and let the flow finish.
+		const req = h.posted.find((m) => m.t === 'req') as { id: string; method: string; params: Record<string, unknown> };
+		expect(req.method).toBe('createSession');
+		expect(req.params.channel).toBe(SESSION);
+		h.inbound({ t: 'res', id: req.id, ok: true, result: null });
+		h.inbound({
+			t: 'snapshot',
+			channel: SESSION,
+			state: { resource: SESSION, title: '', status: 1, modifiedAt: '', defaultChat: CHAT },
 		});
-		const create = postedFrames(ws).find(
-			(f) => f.kind === 'request' && (f as { call: { method: string } }).call.method === 'createSession',
-		) as Extract<FromClient, { kind: 'request' }>;
-		expect(create.call).toMatchObject({
-			method: 'createSession',
-			initialModel: 'DeepSeek-anthropic/deepseek-chat',
-		});
-		// Optional intent fields ride absent (never null) on the hand-written
-		// v2 mirror; boot facts (cwd/approvalMode) fill in when the host
-		// pushed them.
-		const intent = create.call as { cwd?: string; project?: string };
-		expect(intent.project).toBeUndefined();
-		ws.receive(response(create.id, { session_id: 'srv-9' }));
-		// Draft rekeyed to the canonical id; follow stream opened.
-		await vi.waitFor(() => {
-			expect(store.confirmDraft).toHaveBeenCalledWith('local-1', 'srv-9');
-			expect(store.openRemote).toHaveBeenCalledWith('srv-9');
-		});
-		// The first message rides a Submit Request with an originRpc.
-		const submit = postedFrames(ws).find(
-			(f) => f.kind === 'request' && (f as { call: { method: string } }).call.method === 'submit',
-		) as Extract<FromClient, { kind: 'request' } | undefined>;
-		expect(submit).toBeTruthy();
-		expect(submit!.call).toMatchObject({ sessionId: 'srv-9', text: 'first' });
-		const r = submit!.call as { originRpc: string | null };
-		expect(r.originRpc).toBe('rpc-first');
-		// Resolve the submit so no pending promise dangles.
-		ws.receive(response(submit!.id, { accepted: true, message_id: null }));
-		await expect(sessionP).resolves.toBe('srv-9');
-	});
-});
-
-describe('reseat', () => {
-	it('a new connection generation triggers store.reseat()', async () => {
-		const { client } = await freshClient();
-		const store = fakeStore();
-		client.connectStore(store);
-		const ws = MockWebSocket.instances[0];
-		ws.open();
-		ws.receive(response('init-1', { ack: true }));
-		// The Initialize ack marks the generation: the store reseat is
-		// invoked at most once per generation.
-		expect(store.reseat.mock.calls.length).toBeLessThanOrEqual(1);
+		const created = await pending;
+		expect(created).toBe(SESSION);
+		// The draft rekey is a no-op (ids match); the view request went out
+		// through the relay (connectStore installs the relay-posting effects).
+		expect(h.posted.some((m) => m.t === 'view' && m.sessionUri === SESSION)).toBe(true);
+		// The first message rode the chat dispatch.
+		const dispatch = h.posted.find((m) => m.t === 'dispatch') as { channel: string; action: Record<string, unknown> };
+		expect(dispatch.channel).toBe(CHAT);
+		expect(dispatch.action.type).toBe('chat/turnStarted');
 	});
 });

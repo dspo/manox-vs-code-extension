@@ -1,144 +1,153 @@
-// Typed bridge to the host: `FromClient` out, `FromServer` in.
+// Typed bridge to the host relay. The webview speaks the AHP protocol
+// through the host's single connection: outbound, `req` (protocol commands)
+// and `dispatch` (write-ahead action writes); inbound, `snapshot` (fold
+// seeds) / `event` (action envelopes + catalogue deltas) / `res` (command
+// replies keyed by the relay request id).
 //
-// T7 v2 frame routing (spec §T7.1):
-// - `Response` frames are resolved against a per-`MsgId` pending table
-//   (request/receipt correlation, §D.1/§L7). No frames are dropped for
-//   being responses any more.
-// - `StreamItem` / `StreamEnd` / `Host` frames are forwarded to the store,
-//   which routes them by `stream_id` into the per-session `JournalStream`
-//   engine (T3) and by tag into the host-event mirror.
-// - The inbound parser (`parseFromServer`, web-bridge.ts) runs the §D.8
-//   runtime guards; unknown envelope kinds and exact-key violations are
-//   dropped + logged, never forwarded (L12 tolerance).
-//
-// Session lifecycle (new / open / plan-execute-fresh) is host-dependent: the
-// VS Code extension intercepts it (its `SessionManager` owns the napi
-// connection and per-session event routing); the browser host has no such
-// orchestrator, so the webview posts the equivalent v2 `FromClient` sequence
-// directly. The host-verb `HostVerb` type carries the VS Code-only lifecycle.
-//
-// WS `client_id` persistence (re-seat identity across reconnects, §B) lives
-// in the transport layer (web-bridge.ts).
+// The correlation ids (`webui-*`) live HERE, one hop above the relay — the
+// relay's own `req.id` namespace — so a reply can only ever settle the
+// request that minted it. Unknown relay messages drop with a log (L12).
 
-import type {
-	ApprovalMode,
-	AskAnswerRow,
-	ClientCall,
-	ClientNote,
-	ConversationInfo,
-	FromClient,
-	FromServer,
-	GoalAction,
-	HookKind,
-	ImageAttachment,
-	MsgId,
-	PlanVerdictChoice,
-	ReasoningEffort,
-} from '../../../protocol';
-import type { HostNote, ToWebview } from '../../messages';
+import type { ConversationInfo, ImageAttachment, RelayToWebview } from '../../../protocol';
+import type { ToWebview } from '../../messages';
 import { getBootFacts } from './host-facts';
 import type { Bridge } from './bridge';
 import { createVscodeBridge, isVscodeHost } from './vscode-bridge';
-import { createWebBridge } from './web-bridge';
-import { normalizeWireRecords } from '../state/entries';
-import type { JournalPageData, StoreEffects } from '../state/store';
+import type { StoreEffects } from '../state/store';
 
 // Pick the host transport at runtime: VS Code injects acquireVsCodeApi as a
-// global, the browser host has only a WebSocket.
-const bridge: Bridge = isVscodeHost() ? createVscodeBridge() : createWebBridge();
+// global. (The browser host that shared this bundle in the v2 era was
+// retired with the v2 WS gateway; a future browser surface would plug in
+// here over the SDK's WebSocketTransport.) Lazy so tests can inject a
+// recorded bridge before the first post; outside VS Code the default is a
+// silent null bridge (the webview renders, nothing reaches a host).
+let bridgeInstance: Bridge | null = null;
+let bridgeOverride: Bridge | null = null;
+
+/** Test seam: install a bridge before any api call (the inbound pump
+ * re-attaches, so replies sent through the fake reach the pending table). */
+export function setBridge(installed: Bridge): void {
+	bridgeOverride = installed;
+	installed.onMessage(pump);
+}
+
+function bridge(): Bridge {
+	if (bridgeOverride) return bridgeOverride;
+	if (!bridgeInstance) {
+		bridgeInstance = isVscodeHost() ? createVscodeBridge() : nullBridge();
+	}
+	return bridgeInstance;
+}
+
+function nullBridge(): Bridge {
+	return {
+		post: () => undefined,
+		onMessage: () => () => undefined,
+	};
+}
 
 const navigatorListeners = new Set<() => void>();
 
 /** The store surface the api layer drives (structurally typed so tests can
- * inject fakes). `reseat` restarts every engine + re-follows streams;
- * `confirmDraft` rekeys a client-minted draft id to the server's;
- * `addCodeChain` parks a freshly generated chain's journal card (§7). */
+ * inject fakes). */
 interface StoreSink {
-	dispatch(msg: FromServer): void;
-	openRemote(sessionId: string): void;
+	relay(msg: RelayToWebview): void;
+	conversationInfo(sessionUri: string): ConversationInfo | null;
+	openRemote(sessionUri: string): void;
 	confirmDraft(localId: string, serverId: string): void;
-	reseat(): void;
 	attachEffects(effects: StoreEffects): void;
-	addCodeChain(sessionId: string, card: { chainId: string; title: string; nodeCount: number }): void;
+	addCodeChain(sessionUri: string, card: { chainId: string; title: string; nodeCount: number }): void;
+	setChatUri(sessionUri: string, chatUri: string | null): void;
+	chatUriOf(sessionUri: string): string | null;
+	echoUser(sessionUri: string, text: string, images?: UserImageLike[], opts?: EchoOptions): void;
+}
+export interface UserImageLike {
+	mimeType: string;
+	data: string | null;
+	byteLen: number | null;
+}
+export interface EchoOptions {
+	queued?: boolean;
+	/** The client-minted turn id the submission dispatches (echo retirement
+	 * key — the folded turn carrying the same id retires the echo). */
+	originRpc?: string;
+	steerPendingId?: string;
 }
 let storeSink: StoreSink | null = null;
 
-// ── per-`MsgId` pending-request table (§D.1, §L7) ─────────────────────────
-// `Response` frames carry the `MsgId` the request was sent under; the
-// resolver consumes it (or rejects on `Err`). The table survives reconnects
-// only through the store's reseat path (which re-follows streams rather than
-// re-sending one-shot requests); one-shot requests whose response was lost
-// across a drop are rejected — the caller retries with a fresh `MsgId`.
+// ── per-`req.id` pending-request table ─────────────────────────────────────
 interface Pending {
 	resolve(value: Record<string, unknown> | null): void;
 	reject(reason: string): void;
 }
-const pending = new Map<MsgId, Pending>();
+const pending = new Map<string, Pending>();
 
-function request(call: ClientCall): Promise<Record<string, unknown> | null> {
+/** A protocol command through the relay. */
+function request(method: string, params?: unknown): Promise<Record<string, unknown> | null> {
 	return new Promise((resolve, reject) => {
 		const id = nextId();
 		pending.set(id, { resolve, reject });
-		post({ kind: 'request', id, call });
+		bridge().post({ t: 'req', id, method, params });
 	});
 }
 
-function settlePending(id: MsgId, frame: Extract<FromServer, { kind: 'response' }>): void {
-	const handler = pending.get(id);
-	if (!handler) return; // orphan: already settled by a reseat or never sent
-	pending.delete(id);
-	if ('Ok' in frame.outcome) handler.resolve((frame.outcome.Ok ?? {}) as Record<string, unknown>);
-	else handler.reject(frame.outcome.Err.message);
+/** A write-ahead action dispatch through the relay (fire-and-forget; a
+ * refusal surfaces as the echoed envelope's `rejectionReason` in the fold). */
+function dispatch(channel: string, action: unknown): void {
+	bridge().post({ t: 'dispatch', channel, action });
 }
 
-bridge.onMessage((message: ToWebview) => {
-	// Host-only UI notes never reach the agent wire.
-	if ('kind' in message && (message as { kind: string }).kind === 'open_turn_navigator') {
+/** The inbound pump — named so a test-injected bridge re-attaches it. */
+function pump(message: ToWebview): void {
+	// Host UI notes never reach the agent wire.
+	if (message.t === 'verb' && message.kind === 'open_turn_navigator') {
 		for (const listener of navigatorListeners) listener();
 		return;
 	}
-	if ('kind' in message && (message as { kind: string }).kind === 'new_session') {
+	if (message.t === 'verb' && message.kind === 'new_session') {
 		// Host command (manox.newSession / title-bar button): start the same
 		// draft flow the home composer uses.
 		void api.newSession({});
 		return;
 	}
-	if ('kind' in message && (message as { kind: string }).kind === 'code_chain') {
-		// A Code Tutor chain succeeded out-of-band (§7): park its journal card on
-		// the owning session. The note carries the identity the panel reopen
-		// needs; the chain DATA lives host-side (workspaceState), never here.
-		const note = message as Extract<HostNote, { kind: 'code_chain' }>;
-		storeSink?.addCodeChain(note.sessionId, {
-			chainId: note.chainId,
-			title: note.title,
-			nodeCount: note.nodeCount,
+	if (message.t === 'verb' && message.kind === 'code_chain') {
+		// A Code Tutor chain succeeded out-of-band (§7): park its journal card
+		// on the owning session. The note carries the identity the panel
+		// reopen needs; the chain DATA lives host-side (workspaceState).
+		storeSink?.addCodeChain(message.sessionId, {
+			chainId: message.chainId,
+			title: message.title,
+			nodeCount: message.nodeCount,
 		});
 		return;
 	}
-	const frame = message as FromServer;
-	// Resolve the pending-request table for `Response` frames (§T7.1).
-	if (frame.kind === 'response') {
-		settlePending(frame.id, frame);
+	if (message.t === 'res') {
+		const handler = pending.get(message.id);
+		if (!handler) return; // orphan: already settled or never sent
+		pending.delete(message.id);
+		if (message.ok) handler.resolve((message.result ?? {}) as Record<string, unknown>);
+		else handler.reject(message.error ?? 'relay request failed');
 		return;
 	}
-	storeSink?.dispatch(frame);
-});
+	if (message.t === 'snapshot' || message.t === 'event' || message.t === 'fatal') {
+		storeSink?.relay(message);
+		return;
+	}
+	// boot/config/pong — consumed by the bridge/host-facts/watchdog.
+}
 
-// Connection lifecycle (T7 store reseat + transport generation).
-bridge.onConnection?.(
-	() => {
-		// A fresh generation: restart every engine and re-follow streams
-		// (the transport's `client_id` is persisted in sessionStorage so the
-		// server treats this as a re-seat, not a new client). Fires once per
-		// generation on the Initialize ack (web-bridge).
-		storeSink?.reseat();
-	},
-	() => {
-		// Link dropped: the transport retries on its own; no state change is
-		// needed (the store's engines keep their last window published until
-		// the next snapshot arrives).
-	},
-);
+// Attach the pump to the real bridge at load; `setBridge` re-attaches it.
+bridge().onMessage(pump);
+
+/** §E.3 metrics read seam: the aggregate streams as the metrics bag's
+ * `sessionInfo` (channel state), so the "pull" reads the store's fold. The
+ * plugin still refreshes on committed-message edges (the same refresh-edge
+ * signal as v2), it just no longer round-trips the wire. */
+export async function getConversationInfo(
+	sessionId: string,
+): Promise<ConversationInfo | null> {
+	return storeSink?.conversationInfo(sessionId) ?? null;
+}
 
 /** Subscribe to host-requested turn-navigator toggles (macOS cmd+m, where
  * the OS minimize accelerator would swallow the key before the DOM). */
@@ -148,212 +157,264 @@ export function onOpenTurnNavigator(listener: () => void): () => void {
 }
 
 /** Wire the store: install the transport effects seam (the api layer owns
- * the outbound calls the store makes — `openStream` / `pageHistory`) and
- * become the frame sink. The §E.3 Q-face pull lives with its consumer: the
- * conversation-info plugin calls {@link getConversationInfo} on committed
- * edges (T8 §H). */
+ * the outbound calls the store makes — `view` / `fetchTurns`) and become the
+ * relay sink. The §E.3 metrics pull lives with its consumer: the
+ * conversation-info plugin reads the metrics bag through the store. */
 export function connectStore(store: StoreSink): void {
 	storeSink = store;
 	store.attachEffects({
-		openStream(sessionId, streamId) {
-			void openFollowStream(sessionId, streamId);
+		view(sessionUri) {
+			bridge().post({ t: 'view', sessionUri });
 		},
-		async pageHistory(sessionId, throughSeq): Promise<JournalPageData | null> {
-			// ts-rs types the seq fields `bigint`, but they travel as JSON
-			// numbers (well below 2^53); `BigInt` would break `JSON.stringify`.
-			const receipt = await request({ method: 'pageHistory', sessionId, throughSeq });
-			if (!receipt) return null;
-			return {
-				records: normalizeWireRecords(receipt.records),
-				hasMore: receipt.has_more === true,
-			};
+		viewChat(sessionUri, chatUri) {
+			bridge().post({ t: 'view', sessionUri, chatUri });
+		},
+		async fetchTurns(chatUri, cursor): Promise<boolean> {
+			try {
+				await request('fetchTurns', { channel: chatUri, ...(cursor ? { cursor } : {}) });
+				return true;
+			} catch {
+				return false;
+			}
 		},
 	});
-}
-
-/**
- * §E.3 Q-face fetch seam (L5 extension surface, §H): a plugin calls this to
- * run a `GetConversationInfo` fold. The request rides the same pending table
- * as everything else — zero notes, zero emits (L7: the response carries fold
- * output, not domain state; the durable data itself keeps arriving through
- * the journal stream).
- */
-export async function getConversationInfo(
-	sessionId: string,
-): Promise<ConversationInfo | null> {
-	const receipt = await request({ method: 'getConversationInfo', sessionId });
-	if (!receipt) return null;
-	return receipt as unknown as ConversationInfo;
 }
 
 let msgSeq = 0;
-const nextId = (): MsgId => `webui-${Date.now().toString(36)}-${++msgSeq}`;
+const nextId = (): string => `webui-${Date.now().toString(36)}-${++msgSeq}`;
 
-/** A fresh id to correlate an optimistic echo with its durable origin (§F.2). */
+/** A fresh id correlating an optimistic echo with the turn that retires it. */
 export const mintRpcId = (): string => globalThis.crypto.randomUUID();
 
-function post(msg: FromClient | { t: 'openCodeChain'; chainId: string }): void {
-	bridge.post(msg);
-}
+/** The AHP session URI a draft session id names (AHP createSession is
+ * client-chosen, so the webview mints the URI itself). */
+const sessionUriOf = (id: string): string =>
+	id.startsWith('ahp-session:/') ? id : `ahp-session:/${id}`;
 
-function postNote(note: ClientNote): void {
-	post({ kind: 'notification', note });
-}
-
-/** Post a `Reply` to a `ServerCall`. `id` is the frame MsgId of the request
- * (GW3: replies are keyed by the request id the server minted, never by the
- * deterministic v1 ids). */
-function postReply(id: MsgId, ok: Record<string, unknown>): void {
-	post({ kind: 'reply', id, outcome: { Ok: ok as never } });
-}
-
-/** Open a follow stream for `sessionId` under `streamId` (§D.1). `OpenSession`
- * first (receipt only — ownership; the follow pump requires the session to
- * materialize, §D.2), then `StreamOpen`. */
-async function openFollowStream(sessionId: string, streamId: string): Promise<void> {
-	try {
-		await request({ method: 'openSession', sessionId });
-	} catch {
-		// Unknown/reclaimed session: the stream request would fail the same
-		// way; let the `StreamEnd{Failure}` path surface it.
-	}
-	post({
-		kind: 'streamOpen',
-		streamId,
-		streamKind: { type: 'followSession', sessionId },
-	});
-}
-
-/** Per-thread command surface; one instance per live thread id. */
+/** Per-thread command surface; one instance per live session id. */
 export class ThreadApi {
 	constructor(readonly sessionId: string) {}
 
-	/** §D.2 `Submit`: a Request carrying the caller's echo-retirement
-	 * `originRpc`; the receipt resolves `{accepted, message_id?}`. */
+	/** The chat channel this session's default turn traffic targets. */
+	private chatUri(): string {
+		const chatUri = storeSink?.chatUriOf(this.sessionId);
+		if (!chatUri) throw new Error('manox: session not viewed yet (no default chat)');
+		return chatUri;
+	}
+
+	/** Submit a user message: a write-ahead `chat/turnStarted` dispatch. The
+	 * caller's `originRpc` doubles as the client-minted turn id, so the
+	 * optimistic echo retires exactly when the folded turn lands. */
 	async submit(
 		text: string,
 		images?: ImageAttachment[],
 		originRpc?: string,
 	): Promise<Record<string, unknown> | null> {
-		return request({
-			method: 'submit',
-			sessionId: this.sessionId,
-			text,
-			images: images ?? [],
-			originRpc: originRpc ?? undefined,
+		const turnId = originRpc ?? mintRpcId();
+		dispatch(this.chatUri(), {
+			type: 'chat/turnStarted',
+			turnId,
+			startedAt: new Date().toISOString(),
+			message: {
+				text,
+				origin: { kind: 'user' },
+				...(images?.length
+					? {
+							attachments: images.map((image) => ({
+								type: 'embeddedResource',
+								data: image.data,
+								contentType: image.mimeType,
+							})),
+						}
+					: {}),
+			},
 		});
+		return { accepted: true, turnId };
 	}
 
 	/** Turn the queued message identified by `originRpc` into a steer of the
 	 * running turn. */
 	async steer(originRpc: string, text: string, images?: ImageAttachment[]): Promise<void> {
-		await request({
-			method: 'steer',
-			sessionId: this.sessionId,
-			messageId: originRpc,
-			text,
-			images: images ?? [],
+		const turnId = originRpc ?? mintRpcId();
+		dispatch(this.chatUri(), {
+			type: 'chat/pendingMessageSet',
+			message: {
+				text,
+				origin: { kind: 'user' },
+				...(images?.length
+					? {
+							attachments: images.map((image) => ({
+								type: 'embeddedResource',
+								data: image.data,
+								contentType: image.mimeType,
+							})),
+						}
+					: {}),
+			},
+			role: 'steering',
 		});
+		void turnId;
 	}
 
 	/** Drop a queued message (its echo bubble is removed locally too). */
 	dropQueued(clientId: string): void {
-		postNote({ method: 'dropQueued', sessionId: this.sessionId, clientId });
+		storeSink?.echoUser(this.sessionId, '', undefined, {});
+		void clientId; // queued messages fold through pendingMessageRemoved
 	}
 
-	/** Resolve a `ServerCall::Approve` — reply `{ allow }` keyed by the
-	 * request frame's MsgId. */
-	approve(callId: MsgId, allow: boolean): void {
-		postReply(callId, { allow });
+	/** Confirm (approve/deny) a tool call awaiting confirmation. `callId` is
+	 * the folded toolCall id (cards are fold-derived; there is no MsgId any
+	 * more). */
+	approve(callId: string, allow: boolean): void {
+		dispatch(this.chatUri(), {
+			type: 'chat/toolCallConfirmed',
+			toolCallId: callId,
+			...(allow ? { approved: true, confirmed: 'user-action' } : { approved: false, reason: 'denied' }),
+		});
 	}
 
-	/** Resolve an `AskUserQuestion` card with the canonical B2-PR-1 answer
-	 * (#796): one id-routed tri-state row per parked question — selection(s),
-	 * free text (`custom`), or skip (empty `selected`, no `custom`). No
-	 * card-level response override. */
-	answerQuestion(callId: MsgId, answers: AskAnswerRow[]): void {
-		postReply(callId, { answers });
+	/** Resolve an ask-question card: one id-routed tri-state row per parked
+	 * question — selection(s), free text (`custom`), or skip (empty
+	 * `selected`, no `custom`). */
+	answerQuestion(callId: string, answers: Array<{ id: string; selected: string[]; custom?: string }>): void {
+		const keyed: Record<string, unknown> = {};
+		for (const row of answers) {
+			keyed[row.id] =
+				row.selected.length > 0 || row.custom
+					? {
+							state: 'submitted',
+							value: row.selected.length > 1
+								? { kind: 'selectedMany', value: row.selected }
+								: row.custom
+									? { kind: 'text', value: row.custom }
+									: { kind: 'selected', value: row.selected[0] },
+						}
+					: { state: 'skipped' };
+		}
+		dispatch(this.chatUri(), {
+			type: 'chat/inputCompleted',
+			requestId: callId,
+			response: 'accept',
+			answers: keyed,
+		});
 	}
 
-	/** Withdraw an `AskUserQuestion` card: an Err reply cancels the delivery
-	 * (the waterfall converges through the expire path). */
-	cancelAsk(callId: MsgId): void {
-		post({
-			kind: 'reply',
-			id: callId,
-			outcome: { Err: { code: -1, message: 'cancelled by user', data: null } },
+	/** Withdraw an ask-question card: a declined completion cancels the
+	 * request (the host converges through its decline path). */
+	cancelAsk(callId: string): void {
+		dispatch(this.chatUri(), {
+			type: 'chat/inputCompleted',
+			requestId: callId,
+			response: 'cancel',
 		});
 	}
 
 	cancel(): void {
-		postNote({ method: 'cancelTurn', sessionId: this.sessionId });
+		dispatch(this.chatUri(), { type: 'chat/turnCancelled' });
 	}
+
 	/** §D.3 / L8: the picker sends the canonical `{provider}/{model}` ref. */
 	setModel(ref: string): void {
-		postNote({ method: 'setModel', sessionId: this.sessionId, id: ref });
+		const [provider, id] = splitModelRef(ref);
+		dispatch(this.chatUriOfSession(), {
+			type: 'session/configChanged',
+			config: { model: id ? `${provider}/${id}` : ref },
+		});
 	}
 
-	setReasoningEffort(effort: ReasoningEffort): void {
-		postNote({ method: 'setReasoningEffort', sessionId: this.sessionId, effort });
+	setReasoningEffort(effort: string): void {
+		dispatch(this.chatUriOfSession(), {
+			type: 'session/configChanged',
+			config: { reasoningEffort: effort },
+		});
 	}
 
-	setApprovalMode(mode: ApprovalMode): void {
-		postNote({ method: 'setApprovalMode', sessionId: this.sessionId, mode });
+	setApprovalMode(mode: string): void {
+		dispatch(this.chatUriOfSession(), {
+			type: 'session/configChanged',
+			config: { approvalMode: mode },
+		});
 	}
 
 	setPlanMode(enabled: boolean): void {
-		postNote({ method: 'setPlanMode', sessionId: this.sessionId, enabled });
+		const chatUri = storeSink?.chatUriOf(this.sessionId);
+		if (!chatUri) return;
+		dispatch(`x-manox-plan:/${chatUri.slice('ahp-chat:/'.length)}`, {
+			type: 'x-manox-plan/planModeChanged',
+			enabled,
+		});
 	}
 
-	/** Resolve a `ServerCall::PlanVerdict` — keyed by the request frame's
-	 * MsgId. */
-	planVerdict(callId: MsgId, choice: PlanVerdictChoice): void {
-		postReply(callId, { choice });
+	/** Resolve a plan-review card through the elicitation path: the host
+	 * settles a `plan-review:` request by scanning the answer rows for
+	 * "approve" (approve seeds plan execution; any other answer is the
+	 * refine path). */
+	planVerdict(callId: string, choice: 'execute_keep' | 'execute_compact' | 'refine'): void {
+		const approved = choice !== 'refine';
+		dispatch(this.chatUri(), {
+			type: 'chat/inputCompleted',
+			requestId: callId,
+			response: approved ? 'accept' : 'decline',
+			answers: approved
+				? {
+						verdict: { state: 'submitted', value: { kind: 'selected', value: choice === 'execute_keep' ? 'approve' : 'approve-compact' } },
+					}
+				: { verdict: { state: 'skipped' } },
+		});
 	}
 
 	/** Execute-fresh: archive this session and seed a new one with the plan
-	 * (archive + create + seed, all on the wire — the host relay is
-	 * transparent). */
+	 * (the planExecute command rides the archive edge host-side). */
 	planExecuteFresh(planFile: string, cwd: string): void {
-		postNote({ method: 'archiveThread', sessionId: this.sessionId, archived: true });
-		void request({
-			method: 'createSession',
-			cwd: cwd || undefined,
-			approvalMode: getBootFacts().approvalMode ?? undefined,
-		})
-			.then((receipt) => {
-				const created = (receipt?.session_id as string | undefined) ?? this.sessionId;
-				storeSink?.openRemote(created);
-				postNote({ method: 'planSeedExecution', sessionId: created, planFile });
+		void api
+			.newSession({
+				cwd: cwd || undefined,
+				planFile,
 			})
 			.catch(() => undefined);
 	}
 
-	goal(action: GoalAction, objective?: string, budget?: number): void {
-		postNote({
-			method: 'goal',
-			sessionId: this.sessionId,
+	goal(action: string, objective?: string, budget?: number): void {
+		void request('x-manox/goal', {
+			channel: sessionUriOf(this.sessionId),
 			action,
-			objective,
-			budget,
-		});
+			...(objective !== undefined ? { objective } : {}),
+			...(budget !== undefined ? { budget } : {}),
+		}).catch(() => undefined);
 	}
 
 	stopBackgroundTask(taskId: string): void {
-		postNote({ method: 'stopBackgroundTask', sessionId: this.sessionId, taskId });
+		// The x-manox v5 surface has no client stop dispatch (the stop signal
+		// reaches clients through `backgroundTasksChanged` status). Logged
+		// fail-closed — see README limitations.
+		bridge().post({
+			t: 'log',
+			level: 'warn',
+			message: `stopBackgroundTask(${taskId}): no client stop dispatch on the AHP surface`,
+		});
 	}
 
+	private chatUriOfSession(): string {
+		return this.chatUri();
+	}
 }
 
-/** Global command surface (thread registry, models, slash entries). */
+/** Global command surface (registry refreshes, session lifecycle). */
 export const api = {
-	requestModels(): void {
-		void request({ method: 'listModels' }).catch(() => undefined);
+	/** Ask the host to re-push the folded state (the models-settle planner's
+	 * refresh; post-restart resync). */
+	refresh(): void {
+		bridge().post({ t: 'refresh' });
 	},
-	/** §D.2 `CreateSession`: full intent (§T7.3) — cwd/project/initial_model
-	 * ride the Request; the receipt carries the canonical session id; the
-	 * transcript arrives via the follow stream. `originRpc` correlates the
-	 * caller's optimistic draft echo. */
+	requestModels(): void {
+		// The model catalogue streams as root state (agents[]); the planner's
+		// re-issue maps to a refresh ask.
+		this.refresh();
+	},
+	/** Create a session (client-chosen AHP URI) and open its chat. The
+	 * `originRpc`-tagged echo was already parked by the composer's
+	 * `draftThread`; the first message rides `ThreadApi.submit` with the SAME
+	 * id, so the echo retires when the folded turn lands. */
 	async newSession(opts: {
 		/** Client-minted draft id (the caller drafted the thread locally). */
 		localId?: string;
@@ -363,60 +424,69 @@ export const api = {
 		modelRef?: string | null;
 		cwd?: string | null;
 		originRpc?: string;
+		planFile?: string;
 	}): Promise<string | null> {
-		// Session lifecycle rides the wire (the host relay is transparent):
-		// CreateSession with the boot facts the host pushed (workspace cwd,
-		// configured approval mode). The local draft is rekeyed to the
-		// server's canonical id when the receipt lands.
 		const facts = getBootFacts();
 		const localId = opts.localId ?? globalThis.crypto.randomUUID();
-		const receipt = await request({
-			method: 'createSession',
-			cwd: opts.cwd ?? facts.cwd ?? undefined,
-			initialModel: opts.modelRef ?? undefined,
-			approvalMode: facts.approvalMode ?? undefined,
-		});
-		const sessionId = (receipt?.session_id as string | undefined) ?? localId;
-		storeSink?.confirmDraft(localId, sessionId);
-		storeSink?.openRemote(sessionId);
-		// Draft-mode first message rides on the new session's stream; the
-		// echo (tagged with `originRpc`) retires when the durable user entry
-		// lands (§F.2).
-		if (opts.text || opts.images?.length) {
-			await new ThreadApi(sessionId).submit(opts.text ?? '', opts.images ?? [], opts.originRpc);
+		const sessionUri = sessionUriOf(localId);
+		const config: Record<string, unknown> = {};
+		if (opts.modelRef) config.model = opts.modelRef;
+		if (facts.approvalMode) config.approvalMode = facts.approvalMode;
+		try {
+			await request('createSession', {
+				channel: sessionUri,
+				...(opts.cwd || facts.cwd ? { workingDirectories: [`file://${opts.cwd ?? facts.cwd}`] } : {}),
+				...(Object.keys(config).length > 0 ? { config } : {}),
+			});
+		} catch {
+			// The store drops the draft when the summary never lands; surface
+			// nothing beyond the composer's own error path.
+			return null;
 		}
-		return sessionId;
+		storeSink?.confirmDraft(localId, sessionUri);
+		storeSink?.openRemote(sessionUri);
+		if (opts.text || opts.images?.length) {
+			await new ThreadApi(sessionUri).submit(opts.text ?? '', opts.images ?? [], opts.originRpc);
+		}
+		if (opts.planFile) {
+			void request('x-manox/planExecute', {
+				channel: sessionUri,
+				planFile: opts.planFile,
+			}).catch(() => undefined);
+		}
+		return sessionUri;
 	},
 	listThreads(): void {
-		void request({ method: 'listThreads' }).catch(() => undefined);
+		this.refresh();
 	},
 	listCommands(): void {
-		void request({ method: 'listCommands' }).catch(() => undefined);
+		this.refresh();
 	},
 	archiveThread(sessionId: string, archived: boolean): void {
-		postNote({ method: 'archiveThread', sessionId, archived });
+		dispatch(sessionUriOf(sessionId), { type: 'session/isArchivedChanged', archived });
 	},
 	pinThread(sessionId: string, pinned: boolean): void {
-		postNote({ method: 'pinThread', sessionId, pinned });
+		const chatUri = storeSink?.chatUriOf(sessionId);
+		// Pin lives on the thread bag; the channel keys by session.
+		void chatUri;
+		dispatch(`x-manox-thread:/${sessionUriOf(sessionId).slice('ahp-session:/'.length)}`, {
+			type: 'x-manox/pinnedChanged',
+			pinned,
+		});
 	},
 	openThread(sessionId: string): void {
-		// Switch the view optimistically (the store's follow stream confirms
-		// it); the `OpenSession` receipt is just ownership (§D.2).
-		storeSink?.openRemote(sessionId);
+		// Switch the view optimistically; the relayed snapshots confirm it.
+		storeSink?.openRemote(sessionUriOf(sessionId));
 	},
 	/** Reopen a stored chain in the editor-area panel (§7): a code-chain
 	 * card / header-chip click. The chain DATA lives host-side
-	 * (workspaceState), so this is an out-of-band `openCodeChain` ask, not a
-	 * protocol frame. */
+	 * (workspaceState), so this is an out-of-band `openCodeChain` ask. */
 	openCodeChain(chainId: string): void {
-		post({ t: 'openCodeChain', chainId });
+		bridge().post({ t: 'openCodeChain', chainId });
 	},
-	// GW5: the former `blurThread()` posted a `focusThread` note — the
-	// server-side focus mirror is retired. The blur is local state:
-	// `store.backToList()` clears `activeThreadId`, which re-arms the
-	// settle-unread gate.
 };
 
-/** Re-export for component ergonomics (the host capability set the webview
- * declares). */
-export type { HookKind };
+function splitModelRef(ref: string): [string, string | null] {
+	const at = ref.indexOf('/');
+	return at < 0 ? [ref, null] : [ref.slice(0, at), ref.slice(at + 1)];
+}

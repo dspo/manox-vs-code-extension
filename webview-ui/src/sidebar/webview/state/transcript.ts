@@ -69,11 +69,15 @@ export type TranscriptItem =
        * input, so the header's `from` reads "You". Store-side pass-through
        * only — the bubble style does not branch on it. */
       author?: 'lead' | 'harness' | { agent: string } | null;
-      /** Echo id of a submission parked while a turn ran; carries the
-       * `originRpc` the durable user entry retires it by (§F.2). */
+      /** Echo id of a submission parked while a turn ran; the folded turn
+       * carrying the same id retires it (the AHP turnStarted action is the
+       * durable user row). */
       clientId?: string;
-      /** RPC id of the `Submit` that created this echo; retired when the
-       * durable user entry with the same `originRpc` lands (§F.2). */
+      /** The client-minted turn id this submission dispatched (echo
+       * retirement key). */
+      turnId?: string;
+      /** RPC id of the `Submit` that created this echo (v2 heritage; unused
+       * under AHP, kept so hand-built items keep compiling). */
       originRpc?: string | null;
       /** Parked: the bubble shows the queued chip until the turn drains. */
       queued?: boolean;
