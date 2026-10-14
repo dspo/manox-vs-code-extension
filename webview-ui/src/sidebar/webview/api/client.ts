@@ -59,6 +59,7 @@ interface StoreSink {
 	addCodeChain(sessionUri: string, card: { chainId: string; title: string; nodeCount: number }): void;
 	setChatUri(sessionUri: string, chatUri: string | null): void;
 	chatUriOf(sessionUri: string): string | null;
+	whenChatReady(sessionUri: string, timeoutMs?: number): Promise<string>;
 	echoUser(sessionUri: string, text: string, images?: UserImageLike[], opts?: EchoOptions): void;
 }
 export interface UserImageLike {
@@ -195,11 +196,15 @@ const sessionUriOf = (id: string): string =>
 export class ThreadApi {
 	constructor(readonly sessionId: string) {}
 
-	/** The chat channel this session's default turn traffic targets. */
-	private chatUri(): string {
-		const chatUri = storeSink?.chatUriOf(this.sessionId);
-		if (!chatUri) throw new Error('manox: session not viewed yet (no default chat)');
-		return chatUri;
+	/** The chat channel this session's default turn traffic targets. Waits
+	 * for the view round-trip when the edge is not known yet — a first
+	 * message can race the session snapshot home (the store queues on the
+	 * fold instead of throwing). */
+	private chatChannel(): Promise<string> {
+		const known = storeSink?.chatUriOf(this.sessionId);
+		if (known) return Promise.resolve(known);
+		if (!storeSink) return Promise.reject(new Error('manox: store not connected'));
+		return storeSink.whenChatReady(this.sessionId);
 	}
 
 	/** Submit a user message: a write-ahead `chat/turnStarted` dispatch. The
@@ -211,7 +216,7 @@ export class ThreadApi {
 		originRpc?: string,
 	): Promise<Record<string, unknown> | null> {
 		const turnId = originRpc ?? mintRpcId();
-		dispatch(this.chatUri(), {
+		dispatch(await this.chatChannel(), {
 			type: 'chat/turnStarted',
 			turnId,
 			startedAt: new Date().toISOString(),
@@ -236,7 +241,7 @@ export class ThreadApi {
 	 * running turn. */
 	async steer(originRpc: string, text: string, images?: ImageAttachment[]): Promise<void> {
 		const turnId = originRpc ?? mintRpcId();
-		dispatch(this.chatUri(), {
+		dispatch(await this.chatChannel(), {
 			type: 'chat/pendingMessageSet',
 			message: {
 				text,
@@ -266,11 +271,13 @@ export class ThreadApi {
 	 * the folded toolCall id (cards are fold-derived; there is no MsgId any
 	 * more). */
 	approve(callId: string, allow: boolean): void {
-		dispatch(this.chatUri(), {
+		void this.chatChannel().then((chatUri) =>
+			dispatch(chatUri, {
 			type: 'chat/toolCallConfirmed',
 			toolCallId: callId,
-			...(allow ? { approved: true, confirmed: 'user-action' } : { approved: false, reason: 'denied' }),
-		});
+				...(allow ? { approved: true, confirmed: 'user-action' } : { approved: false, reason: 'denied' }),
+			}),
+		).catch((e) => console.warn('manox webview: approve failed:', (e as Error).message));
 	}
 
 	/** Resolve an ask-question card: one id-routed tri-state row per parked
@@ -291,46 +298,52 @@ export class ThreadApi {
 						}
 					: { state: 'skipped' };
 		}
-		dispatch(this.chatUri(), {
-			type: 'chat/inputCompleted',
-			requestId: callId,
-			response: 'accept',
-			answers: keyed,
-		});
+		void this.chatChannel().then((chatUri) =>
+			dispatch(chatUri, {
+				type: 'chat/inputCompleted',
+				requestId: callId,
+				response: 'accept',
+				answers: keyed,
+			}),
+		).catch((e) => console.warn('manox webview: answer failed:', (e as Error).message));
 	}
 
 	/** Withdraw an ask-question card: a declined completion cancels the
 	 * request (the host converges through its decline path). */
 	cancelAsk(callId: string): void {
-		dispatch(this.chatUri(), {
-			type: 'chat/inputCompleted',
-			requestId: callId,
-			response: 'cancel',
-		});
+		void this.chatChannel().then((chatUri) =>
+			dispatch(chatUri, {
+				type: 'chat/inputCompleted',
+				requestId: callId,
+				response: 'cancel',
+			}),
+		).catch((e) => console.warn('manox webview: cancelAsk failed:', (e as Error).message));
 	}
 
 	cancel(): void {
-		dispatch(this.chatUri(), { type: 'chat/turnCancelled' });
+		void this.chatChannel().then((chatUri) =>
+			dispatch(chatUri, { type: 'chat/turnCancelled' }),
+		).catch((e) => console.warn('manox webview: cancel failed:', (e as Error).message));
 	}
 
-	/** §D.3 / L8: the picker sends the canonical `{provider}/{model}` ref. */
+	/** §D.3 / L8: the picker sends the canonical `{provider}/{model}` ref.
+	 * Session config rides the SESSION channel — no chat dependency. */
 	setModel(ref: string): void {
-		const [provider, id] = splitModelRef(ref);
-		dispatch(this.chatUriOfSession(), {
+		dispatch(sessionUriOf(this.sessionId), {
 			type: 'session/configChanged',
-			config: { model: id ? `${provider}/${id}` : ref },
+			config: { model: ref },
 		});
 	}
 
 	setReasoningEffort(effort: string): void {
-		dispatch(this.chatUriOfSession(), {
+		dispatch(sessionUriOf(this.sessionId), {
 			type: 'session/configChanged',
 			config: { reasoningEffort: effort },
 		});
 	}
 
 	setApprovalMode(mode: string): void {
-		dispatch(this.chatUriOfSession(), {
+		dispatch(sessionUriOf(this.sessionId), {
 			type: 'session/configChanged',
 			config: { approvalMode: mode },
 		});
@@ -351,16 +364,18 @@ export class ThreadApi {
 	 * refine path). */
 	planVerdict(callId: string, choice: 'execute_keep' | 'execute_compact' | 'refine'): void {
 		const approved = choice !== 'refine';
-		dispatch(this.chatUri(), {
-			type: 'chat/inputCompleted',
-			requestId: callId,
-			response: approved ? 'accept' : 'decline',
-			answers: approved
-				? {
-						verdict: { state: 'submitted', value: { kind: 'selected', value: choice === 'execute_keep' ? 'approve' : 'approve-compact' } },
-					}
-				: { verdict: { state: 'skipped' } },
-		});
+		void this.chatChannel().then((chatUri) =>
+			dispatch(chatUri, {
+				type: 'chat/inputCompleted',
+				requestId: callId,
+				response: approved ? 'accept' : 'decline',
+				answers: approved
+					? {
+							verdict: { state: 'submitted', value: { kind: 'selected', value: choice === 'execute_keep' ? 'approve' : 'approve-compact' } },
+						}
+					: { verdict: { state: 'skipped' } },
+			}),
+		).catch((e) => console.warn('manox webview: verdict failed:', (e as Error).message));
 	}
 
 	/** Execute-fresh: archive this session and seed a new one with the plan
@@ -394,9 +409,6 @@ export class ThreadApi {
 		});
 	}
 
-	private chatUriOfSession(): string {
-		return this.chatUri();
-	}
 }
 
 /** Global command surface (registry refreshes, session lifecycle). */
@@ -485,8 +497,3 @@ export const api = {
 		bridge().post({ t: 'openCodeChain', chainId });
 	},
 };
-
-function splitModelRef(ref: string): [string, string | null] {
-	const at = ref.indexOf('/');
-	return at < 0 ? [ref, null] : [ref.slice(0, at), ref.slice(at + 1)];
-}

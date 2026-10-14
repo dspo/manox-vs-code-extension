@@ -83,7 +83,7 @@ describe('snapshot seeding', () => {
 						id: 'turn-1',
 						startedAt: '2026-10-13T08:00:01.000Z',
 						message: { text: 'hello', origin: { kind: 'user' } },
-						responseParts: [{ kind: 'markdown', id: 'm1', text: 'hi there' }],
+						responseParts: [{ kind: 'markdown', id: 'm1', content: 'hi there' }],
 					},
 				],
 			},
@@ -110,7 +110,7 @@ describe('snapshot seeding', () => {
 			},
 		});
 		expect(store.get().models).toEqual([
-			{ id: 'glm-5', name: 'GLM-5', provider: 'manox', api: '', context_window: 200_000 },
+			{ id: 'glm-5', name: 'GLM-5', provider: 'manox', provider_name: 'manox', api: '', context_window: 200_000 },
 		]);
 	});
 
@@ -143,8 +143,8 @@ describe('snapshot seeding', () => {
 			},
 		});
 		expect(store.get().models).toEqual([
-			{ id: 'glm-5', name: 'GLM-5', provider: 'BigModel-anthropic', api: '', context_window: 200_000 },
-			{ id: 'glm-4-flash', name: 'GLM-4 Flash', provider: 'BigModel-anthropic', api: '', context_window: 0 },
+			{ id: 'glm-5', name: 'GLM-5', provider: 'BigModel-anthropic', provider_name: 'BigModel', api: '', context_window: 200_000 },
+			{ id: 'glm-4-flash', name: 'GLM-4 Flash', provider: 'BigModel-anthropic', provider_name: 'BigModel', api: '', context_window: 0 },
 		]);
 	});
 
