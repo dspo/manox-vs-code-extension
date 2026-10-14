@@ -169,8 +169,45 @@ export class ManoxClient {
 		manox.initResult = init;
 		for (const uri of INITIAL_SUBSCRIPTIONS) manox.attach(uri);
 		for (const snapshot of init.snapshots ?? []) manox.applySnapshot(snapshot);
+		manox.hydrateSessionCatalogue();
 		options.log?.('info', `AHP initialized: protocol ${init.protocolVersion}, serverSeq ${init.serverSeq}`);
 		return manox;
+	}
+
+	/**
+	 * Pull the pre-existing session catalogue (`listSessions`, paginated).
+	 * The root snapshot does NOT carry it, and `root/sessionAdded` only
+	 * covers sessions created while connected — without this sweep the
+	 * sidebar shows no history at all. Two extra delayed passes cover the
+	 * host's async thread-store refresh (an immediate first sweep can
+	 * legitimately answer an empty page — probe-verified); every row
+	 * upserts AND fans out as a `sessionAdded` relay event, so late-landing
+	 * rows still reach the webview no matter when they land.
+	 */
+	private hydrateSessionCatalogue(): void {
+		const sweep = (): Promise<void> => this.sweepCatalogue();
+		void sweep().catch((e) => this.options.log?.('warn', `session catalogue sweep failed: ${(e as Error).message}`));
+		const retries = [2_000, 6_000];
+		for (const delay of retries) {
+			setTimeout(() => void sweep().catch((e) => this.options.log?.('warn', `catalogue re-sweep failed: ${(e as Error).message}`)), delay);
+		}
+	}
+
+	/** One paginated `listSessions` pass: upsert every summary, fan out the
+	 * rows that are new to the catalogue. */
+	private async sweepCatalogue(): Promise<void> {
+		const fresh = await sweepSessionCatalogue(
+			this.request.bind(this),
+			(summary, isNew) => {
+				this.upsertRow(summary);
+				if (isNew) this.fanout({ type: 'sessionAdded', summary });
+			},
+			(uri) => this.sessions.has(uri),
+		);
+		if (fresh > 0) {
+			this.options.log?.('info', `session catalogue: ${fresh} new row(s)`);
+			this.changed();
+		}
 	}
 
 	/** The negotiated protocol version (diagnostics). */
@@ -724,6 +761,33 @@ export class ManoxClient {
 
 /** AHP NotFound (-32008): the channel's backing resource does not exist
  * (yet). */
+/** One paginated `listSessions` pass over a generic request face: upserts
+ * every summary through `onSummary` (flagging rows the consumer has not
+ * seen — `isNew`), returns the fresh count. Exported for the catalogue
+ * hydration test. */
+export async function sweepSessionCatalogue(
+	request: (method: string, params: unknown) => Promise<unknown>,
+	onSummary: (summary: SessionSummary, isNew: boolean) => void,
+	hasRow: (uri: URI) => boolean,
+): Promise<number> {
+	let cursor: string | undefined;
+	let fresh = 0;
+	do {
+		const result = (await request('listSessions', {
+			channel: 'ahp-root://',
+			...(cursor ? { cursor } : {}),
+		})) as { items?: SessionSummary[]; nextCursor?: string } | null;
+		const items = Array.isArray(result?.items) ? result.items : [];
+		for (const summary of items) {
+			const isNew = !hasRow(summary.resource);
+			if (isNew) fresh += 1;
+			onSummary(summary, isNew);
+		}
+		cursor = typeof result?.nextCursor === 'string' ? result.nextCursor : undefined;
+	} while (cursor);
+	return fresh;
+}
+
 function isNotFound(e: unknown): boolean {
 	const code = (e as { code?: unknown }).code;
 	return code === -32008;
