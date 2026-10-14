@@ -22,6 +22,7 @@
 
 import { chatReducer } from '@microsoft/agent-host-protocol';
 import type { AhpChatState, AhpSessionSummary, ApprovalMode, BackgroundTaskSnapshotWire, CommandEntry, ConversationInfo, GoalSnapshotWire, ModelInfo, PlanSnapshotWire, ReasoningEffort, RelayEvent, RelayToWebview, SubagentChildWire, ThreadListItem } from '../../../protocol';
+import { wireApiOf } from '../lib/api-tint';
 import {
 	EXT_ACTIONS,
 	EXT_CHANNELS,
@@ -175,6 +176,7 @@ export class Store {
 
 	// ── client-owned (never folded from the wire) ──────────────────────────
 	private readonly echoes = new Map<string, Echo[]>();
+	private readonly clientModelRefs = new Map<string, string>();
 	private echoSeq = 0;
 	private readonly creating = new Set<string>();
 	private readonly workspaces = { workspaces: [] as unknown[], order: undefined as unknown };
@@ -549,6 +551,24 @@ export class Store {
 		});
 	}
 
+	/** Remember the client's own model selection for a session. The host
+	 * does NOT fold `session/configChanged` back into the session state
+	 * (probe-verified against v0.3.0: `state.config` stays absent), so this
+	 * client-owned memory is what the picker displays until the fold carries
+	 * a model of its own. */
+	setClientModelRef(sessionUri: string, modelRef: string): void {
+		this.clientModelRefs.set(sessionUri, modelRef);
+		this.publish();
+	}
+
+	/** Whether the root registry has settled (models non-empty). The
+	 * `session/configChanged` write for a fresh session resolves against
+	 * the provider registry — an unknown-model rejection here is a COLD
+	 * registry, not a bad ref. */
+	modelsReady(): boolean {
+		return this.models.length > 0;
+	}
+
 	/** Record the chat↔session edge (the api, after viewing). */
 	setChatUri(sessionUri: string, chatUri: string | null): void {
 		const edge = this.ensureEdge(sessionUri);
@@ -622,6 +642,7 @@ export class Store {
 			this.codeChainCards.delete(edge.chatUri);
 		}
 		this.echoes.delete(sessionUri);
+		this.clientModelRefs.delete(sessionUri);
 		this.edges.delete(sessionUri);
 		this.creating.delete(sessionUri);
 		const perThread = { ...this.state.perThread };
@@ -778,7 +799,13 @@ export class Store {
 			turnActive,
 			planMode: planBag?.planMode === true,
 			items,
-			modelRef: this.currentModelRef(chat),
+			// The picker's selection is client-owned memory (the host does not
+			// fold config back); the chat's own message/draft model (a
+			// per-turn override) wins when present, then any folded config.
+			modelRef:
+				this.currentModelRef(chat) ??
+				this.clientModelRefs.get(sessionUri) ??
+				asModelRef(configValues.model),
 			approvalMode: kebabMode(configValues.approvalMode) ?? prev.approvalMode,
 			reasoningEffort: (asString(configValues.reasoningEffort) as ReasoningEffort | null) ?? prev.reasoningEffort,
 			branch: null,
@@ -869,6 +896,12 @@ function deriveModels(agents: unknown[]): ModelInfo[] {
 		const models = Array.isArray(record.models) ? record.models : [];
 		return models.flatMap((model) => {
 			if (!isRecord(model) || typeof model.id !== 'string' || !provider) return [];
+			// The wire api rides the row's `_meta["x-manox"].api` (probe-
+			// verified: `"api": "anthropic"`); the provider-id suffix is the
+			// fallback when a future host drops the meta.
+			const meta = isRecord(record._meta) ? record._meta : {};
+			const ext = isRecord(meta['x-manox']) ? meta['x-manox'] : {};
+			const api = typeof ext.api === 'string' && ext.api !== '' ? ext.api : wireApiOf(provider);
 			return [{
 				id: model.id,
 				name: typeof model.name === 'string' ? model.name : model.id,
@@ -877,7 +910,7 @@ function deriveModels(agents: unknown[]): ModelInfo[] {
 				// it, so the wire variants (BigModel-anthropic/-responses/…)
 				// land in ONE submenu with per-row wire badges.
 				provider_name: typeof record.displayName === 'string' ? record.displayName : undefined,
-				api: '',
+				api,
 				context_window: typeof model.maxContextWindow === 'number' ? model.maxContextWindow : 0,
 			}];
 		});
@@ -935,6 +968,12 @@ export function fileUriToPath(uri: string): string | undefined {
 	let path = decodeURIComponent(uri.slice('file://'.length));
 	path = path.replace(/^\/(?=[^/])/, '/');
 	return path;
+}
+
+/** The session config's `model` value is the canonical `{provider}/{id}`
+ * ref string (what `setModel` dispatched and the runtime applied). */
+function asModelRef(value: unknown): string | null {
+	return typeof value === 'string' && value.includes('/') ? value : null;
 }
 
 function kebabMode(mode: unknown): ApprovalMode | null {
