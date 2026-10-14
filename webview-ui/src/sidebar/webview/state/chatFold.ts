@@ -73,8 +73,9 @@ function mapPart(items: TranscriptItem[], turnId: string, part: unknown): void {
 	if (!isRecord(part) || typeof part.kind !== 'string') return;
 	switch (part.kind) {
 		case 'markdown': {
+			// The text rides `content` (MarkdownResponsePart), not `text`.
 			const id = typeof part.id === 'string' ? part.id : `m-${items.length}`;
-			const text = typeof part.text === 'string' ? part.text : '';
+			const text = typeof part.content === 'string' ? part.content : '';
 			if (text !== '') items.push({ kind: 'assistant', id, text });
 			return;
 		}
@@ -108,10 +109,10 @@ function mapPart(items: TranscriptItem[], turnId: string, part: unknown): void {
 }
 
 function mapToolCall(items: TranscriptItem[], _turnId: string, call: Record<string, unknown>): void {
-	const id = String(call.id);
+	const id = String(call.toolCallId ?? call.id ?? '');
 	const status = typeof call.status === 'string' ? call.status : '';
-	const name = typeof call.name === 'string' ? call.name : 'tool';
-	const title = typeof call.title === 'string' && call.title !== '' ? call.title : name;
+	const name = typeof call.toolName === 'string' ? call.toolName : 'tool';
+	const title = typeof call.displayName === 'string' && call.displayName !== '' ? call.displayName : name;
 	if (status === 'pending-confirmation' || status === 'pending-result-confirmation') {
 		items.push({
 			kind: 'approval',
@@ -119,7 +120,7 @@ function mapToolCall(items: TranscriptItem[], _turnId: string, call: Record<stri
 			callId: id,
 			toolName: name,
 			summary: typeof call.confirmationTitle === 'string' ? call.confirmationTitle : title,
-			input: call.input,
+			input: call.toolInput ?? call.input,
 		});
 		return;
 	}

@@ -21,6 +21,18 @@ const FALLBACK = {
   border: 'border-muted-foreground/50',
 };
 
+/** The wire suffix manox appends to provider ids (`DeepSeek-anthropic`),
+ * mapped onto this module's API_META keys. Bare keys pass through; unknown
+ * suffixes answer '' (the N/A fallback). */
+export const wireApiOf = (providerId: string): string => {
+  for (const suffix of ['anthropic', 'responses', 'completions']) {
+    if (providerId === suffix || providerId.endsWith(`-${suffix}`)) {
+      return suffix === 'responses' ? 'openai_responses' : suffix === 'completions' ? 'openai_completions' : 'anthropic';
+    }
+  }
+  return API_META[providerId] ? providerId : '';
+};
+
 /** Text tint for a bare model-name span (picker trigger, usage rows). */
 export const apiTint = (api: string): string => (API_META[api] ?? FALLBACK).text;
 

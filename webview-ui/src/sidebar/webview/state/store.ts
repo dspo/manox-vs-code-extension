@@ -518,6 +518,37 @@ export class Store {
 		return this.edges.get(sessionUri)?.chatUri ?? null;
 	}
 
+	/** Resolve the session's chat URI, waiting for the view round-trip when
+	 * the edge is not known yet (a first message raced ahead of the session
+	 * snapshot — the submit must queue on the fold, not throw). Rejects on
+	 * the timeout so a dead relay surfaces as a failed send, not a hang. */
+	whenChatReady(sessionUri: string, timeoutMs = 15_000): Promise<string> {
+		const known = this.chatUriOf(sessionUri);
+		if (known) return Promise.resolve(known);
+		return new Promise<string>((resolve, reject) => {
+			const timer = setTimeout(() => {
+				unsubscribe();
+				reject(new Error(`manox: session ${sessionUri} has no default chat after ${timeoutMs}ms`));
+			}, timeoutMs);
+			const unsubscribe = this.subscribe(() => {
+				const chatUri = this.chatUriOf(sessionUri);
+				if (chatUri) {
+					clearTimeout(timer);
+					unsubscribe();
+					resolve(chatUri);
+				}
+			});
+			// The subscribe callback only fires on PUBLISH; check once more in
+			// case the edge landed between the first read and the subscription.
+			const immediate = this.chatUriOf(sessionUri);
+			if (immediate) {
+				clearTimeout(timer);
+				unsubscribe();
+				resolve(immediate);
+			}
+		});
+	}
+
 	/** Record the chat↔session edge (the api, after viewing). */
 	setChatUri(sessionUri: string, chatUri: string | null): void {
 		const edge = this.ensureEdge(sessionUri);
@@ -554,6 +585,9 @@ export class Store {
 	}
 
 	private upsertSummary(summary: AhpSessionSummary): void {
+		// Tolerance: a summary without an identity would poison the fold (a
+		// poisoned `undefined` key makes EVERY later derive throw). Drop it.
+		if (typeof summary.resource !== 'string' || summary.resource === '') return;
 		this.summaries.set(summary.resource, summary);
 		const sessionUri = summary.resource;
 		const state = this.sessionStates.get(sessionUri);
@@ -643,10 +677,12 @@ export class Store {
 
 	private derive(prev: ChatState): ChatState {
 		const threads: ThreadListItem[] = [...this.summaries.values()]
+			.filter((summary) => typeof summary.resource === 'string')
 			.map((summary) => this.toRow(summary))
 			.sort((a, b) => b.updated_at - a.updated_at);
 		const perThread: Record<string, ThreadState> = {};
 		for (const [sessionUri, edge] of this.edges) {
+			if (typeof sessionUri !== 'string') continue;
 			const summary = this.summaries.get(sessionUri);
 			const prevThread = prev.perThread[sessionUri] ?? initThread(sessionUri);
 			perThread[sessionUri] = this.deriveThread(sessionUri, edge, summary, prevThread);
@@ -837,6 +873,10 @@ function deriveModels(agents: unknown[]): ModelInfo[] {
 				id: model.id,
 				name: typeof model.name === 'string' ? model.name : model.id,
 				provider,
+				// The agent's display name ("BigModel") — the picker groups by
+				// it, so the wire variants (BigModel-anthropic/-responses/…)
+				// land in ONE submenu with per-row wire badges.
+				provider_name: typeof record.displayName === 'string' ? record.displayName : undefined,
 				api: '',
 				context_window: typeof model.maxContextWindow === 'number' ? model.maxContextWindow : 0,
 			}];
@@ -855,7 +895,11 @@ function emptyChat(resource: string): AhpChatState {
 }
 
 function summaryLike(resource: string, state: Record<string, unknown>): AhpSessionSummary {
-	return state as unknown as AhpSessionSummary & { resource: string };
+	// The session STATE snapshot carries no `resource` (it lives on the
+	// snapshot envelope; the host wraps `{resource, state}`) — the channel
+	// IS the identity. Without this, the summary poisons the fold under an
+	// `undefined` key and every later derive throws on it.
+	return { resource, ...state } as unknown as AhpSessionSummary;
 }
 
 /** Fold one session-channel action into the local session record (the

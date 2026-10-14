@@ -45,7 +45,7 @@ function harness() {
 }
 
 describe('dispatch shapes', () => {
-	it('submit dispatches chat/turnStarted with the caller id as the turn id', () => {
+	it('submit dispatches chat/turnStarted with the caller id as the turn id', async () => {
 		const h = harness();
 		connectStore({
 			relay: h.store.relay.bind(h.store),
@@ -55,10 +55,12 @@ describe('dispatch shapes', () => {
 			addCodeChain: h.store.addCodeChain.bind(h.store),
 			setChatUri: h.store.setChatUri.bind(h.store),
 			chatUriOf: () => CHAT,
+			whenChatReady: () => Promise.resolve(CHAT),
 			echoUser: h.store.echoUser.bind(h.store),
 			conversationInfo: () => null,
 		});
 		void new ThreadApi(SESSION).submit('fix it', undefined, 'turn-9');
+		await new Promise((resolve) => setTimeout(resolve, 0)); // the dispatch rides whenChatReady's microtask
 		const dispatch = h.posted.find((m) => m.t === 'dispatch');
 		expect(dispatch?.t).toBe('dispatch');
 		const action = (dispatch as { action: Record<string, unknown> }).action;
@@ -69,7 +71,7 @@ describe('dispatch shapes', () => {
 		expect(message.origin?.kind).toBe('user');
 	});
 
-	it('approve dispatches the confirmed action with the fold id', () => {
+	it('approve dispatches the confirmed action with the fold id', async () => {
 		const h = harness();
 		connectStore({
 			relay: h.store.relay.bind(h.store),
@@ -79,10 +81,12 @@ describe('dispatch shapes', () => {
 			addCodeChain: h.store.addCodeChain.bind(h.store),
 			setChatUri: h.store.setChatUri.bind(h.store),
 			chatUriOf: () => CHAT,
+			whenChatReady: () => Promise.resolve(CHAT),
 			echoUser: h.store.echoUser.bind(h.store),
 			conversationInfo: () => null,
 		});
 		new ThreadApi(SESSION).approve('call-1', false);
+		await new Promise((resolve) => setTimeout(resolve, 0)); // the dispatch rides whenChatReady's microtask
 		const dispatch = h.posted.find((m) => m.t === 'dispatch') as { action: Record<string, unknown> };
 		expect(dispatch.action.type).toBe('chat/toolCallConfirmed');
 		expect(dispatch.action.toolCallId).toBe('call-1');
@@ -102,6 +106,7 @@ describe('newSession', () => {
 			addCodeChain: h.store.addCodeChain.bind(h.store),
 			setChatUri: h.store.setChatUri.bind(h.store),
 			chatUriOf: () => CHAT,
+			whenChatReady: () => Promise.resolve(CHAT),
 			echoUser: h.store.echoUser.bind(h.store),
 			conversationInfo: () => null,
 		});

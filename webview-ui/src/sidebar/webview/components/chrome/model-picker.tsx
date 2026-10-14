@@ -4,7 +4,7 @@ import { useState } from 'react';
 import type { ModelInfo, ReasoningEffort } from '../../../../protocol';
 import { ThreadApi } from '../../api/client';
 import { findCurrentModel } from '../../lib/current-model';
-import { apiTag, apiTint } from '../../lib/api-tint';
+import { apiTag, apiTint, wireApiOf } from '../../lib/api-tint';
 import { t } from '../../lib/i18n';
 import { cn } from '../../lib/utils';
 import { Badge } from '../ui/badge';
@@ -44,8 +44,10 @@ export const ModelPicker = ({
 }: ModelPickerProps) => {
   const [open, setOpen] = useState(false);
   const current = findCurrentModel(models, currentModelRef);
-  // Group by provider DISPLAY name with same-name registrations merged into
-  // one submenu, mirroring the host's popup grouping.
+  // Two levels: ONE submenu per provider (the display name — wire variants
+  // of a provider merge), and one row per (model, wire) carrying the wire
+  // badge — `[anthropic] deepseek-flash[1m]` — instead of splitting the
+  // provider level by wire type.
   const groups: { name: string; models: ModelInfo[] }[] = [];
   for (const m of models) {
     const name = m.provider_name ?? m.provider;
@@ -79,7 +81,7 @@ export const ModelPicker = ({
             <>
               <span className="shrink-0">{current.provider_name ?? current.provider}</span>
               <span className="text-muted-foreground shrink-0">·</span>
-              <span className={cn('max-w-40 truncate', apiTint(current.api))}>
+              <span className={cn('max-w-40 truncate', apiTint(wireApiOf(current.provider)))}>
                 {current.name}
               </span>
               <span className="text-muted-foreground shrink-0">·</span>
@@ -97,7 +99,7 @@ export const ModelPicker = ({
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="end"
-        className="max-h-[320px] w-52 overflow-y-auto"
+        className="max-h-[320px] w-64 overflow-y-auto"
         side="top"
       >
         {groups.length === 0 ? (
@@ -110,9 +112,9 @@ export const ModelPicker = ({
               <DropdownMenuSubTrigger>
                 <span className="truncate text-sm font-medium">{group.name}</span>
               </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent className="max-h-[320px] w-64 overflow-y-auto">
+              <DropdownMenuSubContent className="max-h-[320px] w-72 overflow-y-auto">
                 {group.models.map((m) => {
-                  const tag = apiTag(m.api);
+                  const tag = apiTag(wireApiOf(m.provider));
                   return (
                     <DropdownMenuItem
                       className="gap-2"
