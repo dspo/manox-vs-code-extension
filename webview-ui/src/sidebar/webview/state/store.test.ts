@@ -114,6 +114,55 @@ describe('snapshot seeding', () => {
 		]);
 	});
 
+	it('a root/agentsChanged action folds the agents payload in place', () => {
+		const { store, relay } = harness();
+		// The initialize snapshot answers `agents: []` (provider registration
+		// completes async); the populated registry arrives as the action.
+		relay({ t: 'snapshot', channel: 'ahp-root://', state: { agents: [] } });
+		expect(store.get().models).toEqual([]);
+		relay({
+			t: 'event',
+			event: {
+				type: 'action',
+				envelope: {
+					channel: 'ahp-root://',
+					action: {
+						type: 'root/agentsChanged',
+						agents: [
+							{
+								provider: 'BigModel-anthropic',
+								displayName: 'BigModel',
+								models: [
+									{ id: 'glm-5', name: 'GLM-5', maxContextWindow: 200_000 },
+									{ id: 'glm-4-flash', name: 'GLM-4 Flash' },
+								],
+							},
+						],
+					},
+				},
+			},
+		});
+		expect(store.get().models).toEqual([
+			{ id: 'glm-5', name: 'GLM-5', provider: 'BigModel-anthropic', api: '', context_window: 200_000 },
+			{ id: 'glm-4-flash', name: 'GLM-4 Flash', provider: 'BigModel-anthropic', api: '', context_window: 0 },
+		]);
+	});
+
+	it('a root/agentsChanged without an agents array is dropped, not applied', () => {
+		const { store, relay } = harness();
+		relay({
+			t: 'snapshot',
+			channel: 'ahp-root://',
+			state: { agents: [{ provider: 'p', models: [{ id: 'm', name: 'M' }] }] },
+		});
+		relay({
+			t: 'event',
+			event: { type: 'action', envelope: { channel: 'ahp-root://', action: { type: 'root/agentsChanged' } } },
+		});
+		// No payload → no fold; the previous registry stands.
+		expect(store.get().models).toHaveLength(1);
+	});
+
 	it('the commands catalogue snapshot fills the slash registry', () => {
 		const { store, relay } = harness();
 		relay({

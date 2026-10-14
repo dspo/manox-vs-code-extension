@@ -221,21 +221,7 @@ export class Store {
 	private applySnapshot(channel: string, state: unknown): void {
 		if (channel === 'ahp-root://') {
 			const agents = isRecord(state) && Array.isArray(state.agents) ? state.agents : [];
-			this.models = agents.flatMap((agent) => {
-				const record = isRecord(agent) ? agent : {};
-				const provider = typeof record.provider === 'string' ? record.provider : null;
-				const models = Array.isArray(record.models) ? record.models : [];
-				return models.flatMap((model) => {
-					if (!isRecord(model) || typeof model.id !== 'string' || !provider) return [];
-					return [{
-						id: model.id,
-						name: typeof model.name === 'string' ? model.name : model.id,
-						provider,
-						api: '',
-						context_window: typeof model.maxContextWindow === 'number' ? model.maxContextWindow : 0,
-					}];
-				});
-			});
+			this.models = deriveModels(agents);
 			this.publish();
 			return;
 		}
@@ -338,10 +324,16 @@ export class Store {
 			return;
 		}
 		if (channel === 'ahp-root://') {
-			// root/agentsChanged etc.: a full re-read is the tolerant fold for
-			// the registry the webview renders (the store holds no root
-			// reducer state — the models list is derived).
-			if (type === 'root/agentsChanged') this.effects.view('ahp-root://');
+			// The registry actions carry the FULL agents array (probe-verified
+			// against the v0.3.0 host: provider registration completes async —
+			// the initialize snapshot answers `agents: []`, and the populated
+			// list arrives as this action seconds later). Fold it in place —
+			// a "re-read" through the relay is a no-op: root is subscribed
+			// during the handshake, and `ensureSubscribed` early-returns.
+			if (type === 'root/agentsChanged' && Array.isArray((action as { agents?: unknown }).agents)) {
+				this.models = deriveModels((action as { agents: unknown[] }).agents);
+				this.publish();
+			}
 			return;
 		}
 		console.debug('[webui] action for unknown channel dropped', channel, type);
@@ -830,6 +822,27 @@ export class Store {
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+/** Derive the picker rows from the root registry's `agents[].models`
+ * (AHP `SessionModelInfo` → the webview-owned `ModelInfo`). Shared by the
+ * root snapshot and the `root/agentsChanged` action — same payload shape. */
+function deriveModels(agents: unknown[]): ModelInfo[] {
+	return agents.flatMap((agent) => {
+		const record = isRecord(agent) ? agent : {};
+		const provider = typeof record.provider === 'string' ? record.provider : null;
+		const models = Array.isArray(record.models) ? record.models : [];
+		return models.flatMap((model) => {
+			if (!isRecord(model) || typeof model.id !== 'string' || !provider) return [];
+			return [{
+				id: model.id,
+				name: typeof model.name === 'string' ? model.name : model.id,
+				provider,
+				api: '',
+				context_window: typeof model.maxContextWindow === 'number' ? model.maxContextWindow : 0,
+			}];
+		});
+	});
+}
 
 function emptyChat(resource: string): AhpChatState {
 	return {
