@@ -141,14 +141,20 @@ class ManoxSidebarProvider implements vscode.WebviewViewProvider {
 	}
 
 	/** Push the current folded state for every channel the webview renders:
-	 * the session catalogue (workspace-scoped), the two catalogues, and any
-	 * session/chat already subscribed. Idempotent — the webview replaces its
-	 * fold per channel. */
+	 * the root registry (agents → the model picker), the session catalogue
+	 * (workspace-scoped), the two catalogues, and any session/chat already
+	 * subscribed. Idempotent — the webview replaces its fold per channel. */
 	private pushBootState(): void {
 		const host = this.hostOrNull();
 		if (!host) return;
 		void host.ready
 			.then(async (manox) => {
+				// The root registry rides FIRST: the model picker renders from
+				// it, and the provider registration that fills `agents[]`
+				// completes async — the webview must not miss whatever is
+				// already folded at push time (later deltas arrive as
+				// relayed `root/agentsChanged` actions).
+				this.post({ t: 'snapshot', channel: 'ahp-root://', state: manox.root });
 				const rows = await threadsOwnedBy(
 					manox.rows().map((row) => row.summary),
 					this.workspaceToken,
