@@ -53,6 +53,8 @@ const navigatorListeners = new Set<() => void>();
 interface StoreSink {
 	relay(msg: RelayToWebview): void;
 	conversationInfo(sessionUri: string): ConversationInfo | null;
+	setClientModelRef(sessionUri: string, modelRef: string): void;
+	modelsReady(): boolean;
 	openRemote(sessionUri: string): void;
 	confirmDraft(localId: string, serverId: string): void;
 	attachEffects(effects: StoreEffects): void;
@@ -437,7 +439,7 @@ export const api = {
 		cwd?: string | null;
 		originRpc?: string;
 		planFile?: string;
-	}): Promise<string | null> {
+		}): Promise<string | null> {
 		const facts = getBootFacts();
 		const localId = opts.localId ?? globalThis.crypto.randomUUID();
 		const sessionUri = sessionUriOf(localId);
@@ -448,12 +450,28 @@ export const api = {
 			await request('createSession', {
 				channel: sessionUri,
 				...(opts.cwd || facts.cwd ? { workingDirectories: [`file://${opts.cwd ?? facts.cwd}`] } : {}),
-				...(Object.keys(config).length > 0 ? { config } : {}),
 			});
 		} catch {
 			// The store drops the draft when the summary never lands; surface
 			// nothing beyond the composer's own error path.
 			return null;
+		}
+		// The host IGNORES `createSession.params.config` (probe-verified:
+		// router takes only the channel; the SessionIntent carries no model/
+		// approval) — the sanctioned config write is the `session/configChanged`
+		// dispatch, applied by the runtime's acceptance arm. It must land
+		// BEFORE the first turn for the model choice to bind — and after the
+		// provider registry has settled, or the write is refused with
+		// `unknown model` (a cold registry, not a bad ref).
+		if (Object.keys(config).length > 0) {
+			void (async () => {
+				const deadline = Date.now() + 30_000;
+				while (storeSink && !storeSink.modelsReady() && Date.now() < deadline) {
+					await new Promise((resolve) => setTimeout(resolve, 250));
+				}
+				if (opts.modelRef) storeSink?.setClientModelRef(sessionUri, opts.modelRef);
+				dispatch(sessionUri, { type: 'session/configChanged', config });
+			})();
 		}
 		storeSink?.confirmDraft(localId, sessionUri);
 		storeSink?.openRemote(sessionUri);

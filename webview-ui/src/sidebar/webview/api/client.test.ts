@@ -56,6 +56,8 @@ describe('dispatch shapes', () => {
 			setChatUri: h.store.setChatUri.bind(h.store),
 			chatUriOf: () => CHAT,
 			whenChatReady: () => Promise.resolve(CHAT),
+			setClientModelRef: () => undefined,
+			modelsReady: () => true,
 			echoUser: h.store.echoUser.bind(h.store),
 			conversationInfo: () => null,
 		});
@@ -82,6 +84,8 @@ describe('dispatch shapes', () => {
 			setChatUri: h.store.setChatUri.bind(h.store),
 			chatUriOf: () => CHAT,
 			whenChatReady: () => Promise.resolve(CHAT),
+			setClientModelRef: () => undefined,
+			modelsReady: () => true,
 			echoUser: h.store.echoUser.bind(h.store),
 			conversationInfo: () => null,
 		});
@@ -107,6 +111,8 @@ describe('newSession', () => {
 			setChatUri: h.store.setChatUri.bind(h.store),
 			chatUriOf: () => CHAT,
 			whenChatReady: () => Promise.resolve(CHAT),
+			setClientModelRef: () => undefined,
+			modelsReady: () => true,
 			echoUser: h.store.echoUser.bind(h.store),
 			conversationInfo: () => null,
 		});

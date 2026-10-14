@@ -143,8 +143,8 @@ describe('snapshot seeding', () => {
 			},
 		});
 		expect(store.get().models).toEqual([
-			{ id: 'glm-5', name: 'GLM-5', provider: 'BigModel-anthropic', provider_name: 'BigModel', api: '', context_window: 200_000 },
-			{ id: 'glm-4-flash', name: 'GLM-4 Flash', provider: 'BigModel-anthropic', provider_name: 'BigModel', api: '', context_window: 0 },
+			{ id: 'glm-5', name: 'GLM-5', provider: 'BigModel-anthropic', provider_name: 'BigModel', api: 'anthropic', context_window: 200_000 },
+			{ id: 'glm-4-flash', name: 'GLM-4 Flash', provider: 'BigModel-anthropic', provider_name: 'BigModel', api: 'anthropic', context_window: 0 },
 		]);
 	});
 
